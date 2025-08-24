@@ -1,0 +1,2830 @@
+--- Merged Files Compilation ---
+Source Directory: C:\Scripts\Random_Scripts\New folder
+Generated on: 2025-08-24 10:29:53
+================================================================================
+
+--- START: enhanced_ocr_filtered.py ---
+--------------------------------------------------------------------------------
+import os
+import sys
+import json
+import re
+import pytesseract
+from PIL import Image
+from PIL.ExifTags import TAGS
+import tkinter as tk
+from tkinter import scrolledtext, messagebox, filedialog, ttk, Listbox, Checkbutton
+import winreg
+import threading
+from difflib import SequenceMatcher
+import subprocess
+import string
+
+# --- New Dependency ---
+try:
+    import piexif
+except ImportError:
+    # This will be handled in the main execution block
+    pass
+# --------------------
+
+# Configuration
+SETTINGS_FILE = "C:\\Scripts\\Saved_json\\merged_ocr_settings.json"
+DEFAULT_SETTINGS = {
+    "custom_text": "",
+    "tesseract_path": r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+    "output_filename": "combined_text.txt",
+    "custom_separator": "////",
+    "merge_custom_name": "",
+    "delete_txt_after_merge": False,
+    "similarity_threshold": 0.8,
+    "metadata_prefix": "",
+    "delete_txt_after_merge_metadata": False,
+    "include_filename_in_ocr_output": False,
+    "custom_text_templates": {  # NEW: Template system
+        "Basic Info": "Date: \nLocation: \nNotes: ",
+        "Document Analysis": "Document Type: \nKey Points: \nAction Items: \nDate Processed: ",
+        "Receipt/Invoice": "Vendor: \nAmount: \nDate: \nCategory: \nPayment Method: ",
+        "Meeting Notes": "Meeting: \nAttendees: \nKey Decisions: \nAction Items: \nNext Steps: ",
+        "Research Notes": "Source: \nTopic: \nKey Findings: \nRelevance: \nFollow-up: ",
+        "Photo Documentation": "Subject: \nDate Taken: \nLocation: \nDescription: \nContext: ",
+        "Medical Records": "Patient: \nDate: \nProvider: \nDiagnosis: \nTreatment: \nNotes: ",
+        "Legal Documents": "Document Type: \nParties: \nDate: \nKey Terms: \nStatus: \nNotes: "
+    },
+    "selected_template": "Basic Info",  # NEW: Remember last selected template
+    # NEW: Text filtering settings
+    "enable_text_filtering": True,
+    "min_word_length": 2,
+    "max_gibberish_ratio": 0.4,
+    "remove_single_chars": True,
+    "min_sentence_words": 3,
+    "filter_excessive_punctuation": True,
+    "preserve_numbers": True,
+    "preserve_currency": True
+}
+
+class MergedOCRApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Enhanced OCR & File Merger with Text Filtering")
+        self.root.geometry("700x1050") # Increased height for filtering options
+        
+        # Processing control variables for OCR
+        self.is_processing_ocr = False
+        self.stop_processing_ocr = False
+        self.ocr_processing_thread = None
+
+        # Processing control variables for Metadata Embedding
+        self.is_processing_metadata = False
+        self.stop_processing_metadata = False
+        self.metadata_processing_thread = None
+        
+        # Ensure settings path exists
+        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        self.settings = self.load_settings()
+        
+        # Check for Tesseract path validity
+        tesseract_path = self.settings.get("tesseract_path", DEFAULT_SETTINGS["tesseract_path"])
+        if os.path.exists(tesseract_path):
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        else:
+            messagebox.showwarning("Tesseract Not Found", f"Tesseract executable not found at:\n{tesseract_path}\nPlease correct the path in the settings file:\n{SETTINGS_FILE}")
+
+        self.folder_path = tk.StringVar()
+        self.create_gui()
+        
+        if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
+            self.folder_path.set(sys.argv[1])
+        
+        # Auto-save settings after GUI loaded
+        self.root.after(1000, self.auto_save_settings)
+
+    def load_settings(self):
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, 'r') as f:
+                    loaded_settings = json.load(f)
+                # Ensure all default keys exist
+                for key, value in DEFAULT_SETTINGS.items():
+                    if key not in loaded_settings:
+                        loaded_settings[key] = value
+                return loaded_settings
+        except Exception as e:
+            print(f"Error loading settings: {e}")
+        return DEFAULT_SETTINGS.copy()
+
+    def _write_settings_to_file(self):
+        try:
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(self.settings, f, indent=4)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save settings: {e}")
+
+    def auto_save_settings(self):
+        try:
+            self.settings["custom_text"] = self.custom_text.get("1.0", tk.END).strip()
+            self.settings["output_filename"] = self.output_name_var.get()
+            self.settings["custom_separator"] = self.separator_var.get()
+            self.settings["merge_custom_name"] = self.merge_custom_name_var.get()
+            self.settings["delete_txt_after_merge"] = self.delete_txt_var.get()
+            self.settings["similarity_threshold"] = self.similarity_scale.get()
+            self.settings["metadata_prefix"] = self.metadata_prefix_var.get()
+            self.settings["delete_txt_after_merge_metadata"] = self.delete_txt_metadata_var.get()
+            self.settings["include_filename_in_ocr_output"] = self.include_filename_ocr_var.get()
+            # NEW: Save selected template
+            if hasattr(self, 'template_var'):
+                self.settings["selected_template"] = self.template_var.get()
+            # NEW: Save text filtering settings
+            if hasattr(self, 'enable_filtering_var'):
+                self.settings["enable_text_filtering"] = self.enable_filtering_var.get()
+                self.settings["min_word_length"] = self.min_word_length_var.get()
+                self.settings["max_gibberish_ratio"] = self.gibberish_ratio_scale.get()
+                self.settings["remove_single_chars"] = self.remove_single_chars_var.get()
+                self.settings["min_sentence_words"] = self.min_sentence_words_var.get()
+                self.settings["filter_excessive_punctuation"] = self.filter_punctuation_var.get()
+                self.settings["preserve_numbers"] = self.preserve_numbers_var.get()
+                self.settings["preserve_currency"] = self.preserve_currency_var.get()
+
+            self._write_settings_to_file()
+        except Exception as e:
+            print(f"Auto-save failed: {e}")
+        self.root.after(5000, self.auto_save_settings)  # Repeat every 5 seconds
+
+    def save_settings(self):
+        self.settings["custom_text"] = self.custom_text.get("1.0", tk.END).strip()
+        self.settings["output_filename"] = self.output_name_var.get()
+        self.settings["custom_separator"] = self.separator_var.get()
+        self.settings["merge_custom_name"] = self.merge_custom_name_var.get()
+        self.settings["delete_txt_after_merge"] = self.delete_txt_var.get()
+        self.settings["similarity_threshold"] = self.similarity_scale.get()
+        self.settings["metadata_prefix"] = self.metadata_prefix_var.get()
+        self.settings["delete_txt_after_merge_metadata"] = self.delete_txt_metadata_var.get()
+        self.settings["include_filename_in_ocr_output"] = self.include_filename_ocr_var.get()
+        # NEW: Save selected template
+        if hasattr(self, 'template_var'):
+            self.settings["selected_template"] = self.template_var.get()
+        # NEW: Save text filtering settings
+        if hasattr(self, 'enable_filtering_var'):
+            self.settings["enable_text_filtering"] = self.enable_filtering_var.get()
+            self.settings["min_word_length"] = self.min_word_length_var.get()
+            self.settings["max_gibberish_ratio"] = self.gibberish_ratio_scale.get()
+            self.settings["remove_single_chars"] = self.remove_single_chars_var.get()
+            self.settings["min_sentence_words"] = self.min_sentence_words_var.get()
+            self.settings["filter_excessive_punctuation"] = self.filter_punctuation_var.get()
+            self.settings["preserve_numbers"] = self.preserve_numbers_var.get()
+            self.settings["preserve_currency"] = self.preserve_currency_var.get()
+
+        self._write_settings_to_file()
+        messagebox.showinfo("Saved", "Settings saved successfully!")
+
+    # NEW: Text filtering and cleaning methods
+    def is_gibberish_word(self, word):
+        """Check if a word is likely gibberish based on character patterns"""
+        if not word or len(word) < 2:
+            return True
+            
+        # Preserve numbers and currency
+        if self.settings.get("preserve_numbers", True) and word.replace('.', '').replace(',', '').isdigit():
+            return False
+        if self.settings.get("preserve_currency", True) and any(c in word for c in '$€£¥₹'):
+            return False
+            
+        # Check for excessive special characters
+        special_chars = sum(1 for c in word if c in '!@#$%^&*()_+-=[]{}|;:,.<>?')
+        if special_chars > len(word) * 0.5:
+            return True
+            
+        # Check for excessive non-alphabetic characters
+        alpha_chars = sum(1 for c in word if c.isalpha())
+        if alpha_chars < len(word) * 0.5 and len(word) > 3:
+            return True
+            
+        # Check for repeating patterns
+        if len(set(word)) < len(word) * 0.3 and len(word) > 3:
+            return True
+            
+        # Check for random character sequences
+        consonant_clusters = re.findall(r'[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]{4,}', word)
+        if consonant_clusters:
+            return True
+            
+        return False
+
+    def calculate_gibberish_ratio(self, text):
+        """Calculate the ratio of gibberish words in the text"""
+        words = text.split()
+        if not words:
+            return 0
+        
+        gibberish_count = sum(1 for word in words if self.is_gibberish_word(word.strip(string.punctuation)))
+        return gibberish_count / len(words)
+
+    def clean_and_filter_text(self, text):
+        """Clean and filter OCR text to remove gibberish"""
+        if not self.settings.get("enable_text_filtering", True):
+            return text
+            
+        if not text or not text.strip():
+            return ""
+        
+        # Split into sentences
+        sentences = re.split(r'[.!?]+', text)
+        cleaned_sentences = []
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+                
+            # Split into words
+            words = sentence.split()
+            cleaned_words = []
+            
+            for word in words:
+                # Remove excessive punctuation if enabled
+                if self.settings.get("filter_excessive_punctuation", True):
+                    # Keep reasonable punctuation but remove excessive
+                    word = re.sub(r'[^\w\s\$€£¥₹.,!?-]{2,}', '', word)
+                    word = re.sub(r'[.,!?-]{3,}', '.', word)
+                
+                # Remove single characters if enabled (except meaningful ones)
+                if self.settings.get("remove_single_chars", True):
+                    if len(word.strip(string.punctuation)) == 1:
+                        if word.lower() not in ['a', 'i', '&', '$', '€', '£', '¥', '₹'] and not word.isdigit():
+                            continue
+                
+                # Check minimum word length
+                min_length = self.settings.get("min_word_length", 2)
+                if len(word.strip(string.punctuation)) < min_length:
+                    # Allow short words that are numbers or common short words
+                    clean_word = word.strip(string.punctuation).lower()
+                    if not (clean_word.isdigit() or clean_word in ['a', 'i', 'is', 'it', 'in', 'on', 'at', 'to', 'of', 'or', 'so', 'my', 'we', 'he', 'me']):
+                        continue
+                
+                # Check if word is gibberish
+                if not self.is_gibberish_word(word.strip(string.punctuation)):
+                    cleaned_words.append(word)
+            
+            # Check minimum words per sentence
+            min_sentence_words = self.settings.get("min_sentence_words", 3)
+            if len(cleaned_words) >= min_sentence_words:
+                cleaned_sentence = ' '.join(cleaned_words)
+                
+                # Final gibberish ratio check for the sentence
+                max_gibberish_ratio = self.settings.get("max_gibberish_ratio", 0.4)
+                if self.calculate_gibberish_ratio(cleaned_sentence) <= max_gibberish_ratio:
+                    cleaned_sentences.append(cleaned_sentence)
+        
+        # Join sentences back together
+        result = '. '.join(cleaned_sentences)
+        if result and not result.endswith('.'):
+            result += '.'
+            
+        # Clean up extra spaces
+        result = re.sub(r'\s+', ' ', result).strip()
+        
+        return result
+
+    # NEW: Template management methods
+    def load_template(self):
+        """Load selected template into custom text field"""
+        selected_template = self.template_var.get()
+        templates = self.settings.get("custom_text_templates", DEFAULT_SETTINGS["custom_text_templates"])
+        
+        if selected_template in templates:
+            self.custom_text.delete("1.0", tk.END)
+            self.custom_text.insert("1.0", templates[selected_template])
+        elif selected_template == "-- Custom --":
+            # Keep current text when "Custom" is selected
+            pass
+        else:
+            # Fallback to first available template
+            first_template = list(templates.keys())[0]
+            self.template_var.set(first_template)
+            self.custom_text.delete("1.0", tk.END)
+            self.custom_text.insert("1.0", templates[first_template])
+
+    def save_as_template(self):
+        """Save current custom text as a new template"""
+        current_text = self.custom_text.get("1.0", tk.END).strip()
+        if not current_text:
+            messagebox.showwarning("Empty Text", "Cannot save empty text as template.")
+            return
+        
+        # Simple dialog to get template name
+        template_name = tk.simpledialog.askstring("Save Template", 
+                                                 "Enter template name:", 
+                                                 initialvalue="My Template")
+        if template_name:
+            # Ensure templates dict exists
+            if "custom_text_templates" not in self.settings:
+                self.settings["custom_text_templates"] = {}
+            
+            self.settings["custom_text_templates"][template_name] = current_text
+            self.template_var.set(template_name)
+            
+            # Update combobox values
+            templates = list(self.settings["custom_text_templates"].keys())
+            templates.append("-- Custom --")
+            self.template_combo['values'] = templates
+            
+            self._write_settings_to_file()
+            messagebox.showinfo("Saved", f"Template '{template_name}' saved successfully!")
+
+    def delete_template(self):
+        """Delete the currently selected template"""
+        selected_template = self.template_var.get()
+        if selected_template == "-- Custom --":
+            messagebox.showwarning("Cannot Delete", "Cannot delete the Custom option.")
+            return
+        
+        if selected_template not in self.settings.get("custom_text_templates", {}):
+            messagebox.showwarning("Not Found", "Selected template not found.")
+            return
+        
+        if messagebox.askyesno("Confirm Delete", f"Delete template '{selected_template}'?"):
+            del self.settings["custom_text_templates"][selected_template]
+            
+            # Update combobox values
+            templates = list(self.settings["custom_text_templates"].keys())
+            templates.append("-- Custom --")
+            self.template_combo['values'] = templates
+            
+            # Select first available template or custom
+            if templates:
+                self.template_var.set(templates[0] if templates[0] != "-- Custom --" else "-- Custom --")
+            else:
+                self.template_var.set("-- Custom --")
+            
+            self._write_settings_to_file()
+            messagebox.showinfo("Deleted", f"Template '{selected_template}' deleted successfully!")
+
+    def create_gui(self):
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.create_ocr_tab(notebook)
+        self.create_merge_tab(notebook)
+        self.create_metadata_tab(notebook)
+
+    def create_ocr_tab(self, notebook):
+        ocr_frame = tk.Frame(notebook)
+        notebook.add(ocr_frame, text="OCR Processor")
+        
+        main_frame = tk.Frame(ocr_frame, padx=10, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # NEW: Text Filtering Settings Frame
+        filtering_frame = tk.LabelFrame(main_frame, text="Text Filtering Settings", padx=5, pady=5)
+        filtering_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        # Enable filtering checkbox
+        self.enable_filtering_var = tk.BooleanVar(value=self.settings.get("enable_text_filtering", True))
+        tk.Checkbutton(filtering_frame, text="Enable OCR text filtering (removes gibberish)", 
+                      variable=self.enable_filtering_var).pack(anchor=tk.W)
+        
+        # Filtering options in a grid
+        filter_options_frame = tk.Frame(filtering_frame)
+        filter_options_frame.pack(fill=tk.X, pady=5)
+        
+        # Row 1
+        row1 = tk.Frame(filter_options_frame)
+        row1.pack(fill=tk.X, pady=2)
+        
+        tk.Label(row1, text="Min word length:").pack(side=tk.LEFT)
+        self.min_word_length_var = tk.IntVar(value=self.settings.get("min_word_length", 2))
+        tk.Spinbox(row1, from_=1, to=5, textvariable=self.min_word_length_var, width=5).pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(row1, text="Min words per sentence:").pack(side=tk.LEFT, padx=(20, 0))
+        self.min_sentence_words_var = tk.IntVar(value=self.settings.get("min_sentence_words", 3))
+        tk.Spinbox(row1, from_=1, to=10, textvariable=self.min_sentence_words_var, width=5).pack(side=tk.LEFT, padx=5)
+        
+        # Row 2 - Gibberish ratio slider
+        row2 = tk.Frame(filter_options_frame)
+        row2.pack(fill=tk.X, pady=2)
+        
+        tk.Label(row2, text="Max gibberish ratio (0.0-1.0):").pack(side=tk.LEFT)
+        self.gibberish_ratio_scale = tk.Scale(row2, from_=0.0, to=1.0, resolution=0.1, orient=tk.HORIZONTAL, 
+                                            length=200, tickinterval=0.2)
+        self.gibberish_ratio_scale.set(self.settings.get("max_gibberish_ratio", 0.4))
+        self.gibberish_ratio_scale.pack(side=tk.LEFT, padx=5)
+        
+        # Row 3 - Checkboxes
+        row3 = tk.Frame(filter_options_frame)
+        row3.pack(fill=tk.X, pady=2)
+        
+        self.remove_single_chars_var = tk.BooleanVar(value=self.settings.get("remove_single_chars", True))
+        tk.Checkbutton(row3, text="Remove single chars", variable=self.remove_single_chars_var).pack(side=tk.LEFT)
+        
+        self.filter_punctuation_var = tk.BooleanVar(value=self.settings.get("filter_excessive_punctuation", True))
+        tk.Checkbutton(row3, text="Filter excessive punctuation", variable=self.filter_punctuation_var).pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Row 4 - Preserve options
+        row4 = tk.Frame(filter_options_frame)
+        row4.pack(fill=tk.X, pady=2)
+        
+        self.preserve_numbers_var = tk.BooleanVar(value=self.settings.get("preserve_numbers", True))
+        tk.Checkbutton(row4, text="Preserve numbers", variable=self.preserve_numbers_var).pack(side=tk.LEFT)
+        
+        self.preserve_currency_var = tk.BooleanVar(value=self.settings.get("preserve_currency", True))
+        tk.Checkbutton(row4, text="Preserve currency symbols", variable=self.preserve_currency_var).pack(side=tk.LEFT, padx=(10, 0))
+
+        # NEW: Template selection section
+        template_frame = tk.LabelFrame(main_frame, text="Custom Text Templates", padx=5, pady=5)
+        template_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Template selection row
+        template_select_frame = tk.Frame(template_frame)
+        template_select_frame.pack(fill=tk.X, pady=2)
+        
+        tk.Label(template_select_frame, text="Template:").pack(side=tk.LEFT)
+        
+        # Get templates and add Custom option
+        templates = list(self.settings.get("custom_text_templates", DEFAULT_SETTINGS["custom_text_templates"]).keys())
+        templates.append("-- Custom --")
+        
+        self.template_var = tk.StringVar(value=self.settings.get("selected_template", "Basic Info"))
+        self.template_combo = ttk.Combobox(template_select_frame, textvariable=self.template_var, 
+                                          values=templates, state="readonly", width=20)
+        self.template_combo.pack(side=tk.LEFT, padx=5)
+        self.template_combo.bind('<<ComboboxSelected>>', lambda e: self.load_template())
+        
+        # Template action buttons
+        tk.Button(template_select_frame, text="Load", command=self.load_template).pack(side=tk.LEFT, padx=2)
+        tk.Button(template_select_frame, text="Save As...", command=self.save_as_template).pack(side=tk.LEFT, padx=2)
+        tk.Button(template_select_frame, text="Delete", command=self.delete_template).pack(side=tk.LEFT, padx=2)
+
+        # Custom text area
+        tk.Label(main_frame, text="Custom Text to Include in Each Entry:").pack(anchor=tk.W)
+        self.custom_text = scrolledtext.ScrolledText(main_frame, height=6)
+        self.custom_text.pack(fill=tk.BOTH, expand=True)
+        self.custom_text.insert(tk.END, self.settings.get("custom_text", ""))
+
+        # Filename inclusion checkbox
+        self.include_filename_ocr_var = tk.BooleanVar(value=self.settings.get("include_filename_in_ocr_output", False))
+        tk.Checkbutton(main_frame, text="Include image filename at the top of OCR text", variable=self.include_filename_ocr_var).pack(anchor=tk.W, pady=5)
+
+        tk.Label(main_frame, text="Custom Separator:").pack(anchor=tk.W, pady=(10, 0))
+        separator_frame = tk.Frame(main_frame)
+        separator_frame.pack(fill=tk.X, pady=2)
+        
+        self.separator_var = tk.StringVar(value=self.settings.get("custom_separator", "////"))
+        tk.Entry(separator_frame, textvariable=self.separator_var, width=15).pack(side=tk.LEFT)
+        tk.Button(separator_frame, text="////", command=lambda: self.separator_var.set("////")).pack(side=tk.LEFT, padx=5)
+        tk.Button(separator_frame, text="---", command=lambda: self.separator_var.set("---")).pack(side=tk.LEFT, padx=2)
+        tk.Button(separator_frame, text="===", command=lambda: self.separator_var.set("===")).pack(side=tk.LEFT, padx=2)
+
+        tk.Label(main_frame, text="Output Filename:").pack(anchor=tk.W, pady=(10, 0))
+        self.output_name_var = tk.StringVar(value=self.settings.get("output_filename", "combined_text.txt"))
+        tk.Entry(main_frame, textvariable=self.output_name_var).pack(fill=tk.X)
+
+        tk.Label(main_frame, text="Folder to Process:").pack(anchor=tk.W, pady=(10, 0))
+        folder_frame = tk.Frame(main_frame)
+        folder_frame.pack(fill=tk.X, pady=5)
+        tk.Entry(folder_frame, textvariable=self.folder_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(folder_frame, text="Browse", command=self.select_and_process_folder).pack(side=tk.RIGHT, padx=5)
+
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=10)
+        tk.Button(button_frame, text="Save Settings", command=self.save_settings).pack(side=tk.LEFT, padx=5)
+        
+        self.process_btn = tk.Button(button_frame, text="Process Folder", command=self.manual_process_folder)
+        self.process_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.stop_btn = tk.Button(button_frame, text="Stop Processing", command=self.stop_ocr_process, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=5)
+
+        progress_frame = tk.Frame(main_frame)
+        progress_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(progress_frame, text="Progress:").pack(anchor=tk.W)
+        self.ocr_progress_var = tk.StringVar(value="Ready")
+        tk.Label(progress_frame, textvariable=self.ocr_progress_var, fg="blue").pack(anchor=tk.W)
+        
+        self.ocr_progress_bar = ttk.Progressbar(progress_frame, mode='determinate')
+        self.ocr_progress_bar.pack(fill=tk.X, pady=2)
+        
+        self.ocr_current_file_var = tk.StringVar(value="")
+        tk.Label(progress_frame, textvariable=self.ocr_current_file_var, fg="green", wraplength=580).pack(anchor=tk.W)
+
+        ctx_frame = tk.Frame(main_frame)
+        ctx_frame.pack(fill=tk.X, pady=5)
+        tk.Label(ctx_frame, text="Context Menu:").pack(side=tk.LEFT, padx=5)
+        tk.Button(ctx_frame, text="Install", command=self.install_context_menu).pack(side=tk.LEFT, padx=5)
+        tk.Button(ctx_frame, text="Uninstall", command=self.uninstall_context_menu).pack(side=tk.LEFT, padx=5)
+
+    def create_merge_tab(self, notebook):
+        merge_frame = tk.Frame(notebook)
+        notebook.add(merge_frame, text="Text File Merger")
+        
+        main_frame = tk.Frame(merge_frame, padx=10, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        instructions = "Merge numbered text files (e.g., 1.txt, 02.txt, name03.txt).\nSelect folder containing numbered .txt files to combine them."
+        tk.Label(main_frame, text=instructions, justify=tk.LEFT, wraplength=600).pack(anchor=tk.W, pady=(0, 10))
+        
+        tk.Label(main_frame, text="Custom Name/Prefix for Merged Content (optional):").pack(anchor=tk.W)
+        self.merge_custom_name_var = tk.StringVar(value=self.settings.get("merge_custom_name", ""))
+        tk.Entry(main_frame, textvariable=self.merge_custom_name_var).pack(fill=tk.X, pady=2)
+        
+        self.delete_txt_var = tk.BooleanVar(value=self.settings.get("delete_txt_after_merge", False))
+        tk.Checkbutton(main_frame, text="Delete original .txt files after merging", variable=self.delete_txt_var).pack(anchor=tk.W, pady=5)
+        
+        tk.Label(main_frame, text="Output Filename for Merged File:").pack(anchor=tk.W, pady=(10, 0))
+        self.merge_output_var = tk.StringVar(value="merged_text_files.txt")
+        tk.Entry(main_frame, textvariable=self.merge_output_var).pack(fill=tk.X, pady=2)
+        
+        tk.Label(main_frame, text="Folder Containing Text Files:").pack(anchor=tk.W, pady=(10, 0))
+        merge_folder_frame = tk.Frame(main_frame)
+        merge_folder_frame.pack(fill=tk.X, pady=5)
+        self.merge_folder_path = tk.StringVar()
+        tk.Entry(merge_folder_frame, textvariable=self.merge_folder_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(merge_folder_frame, text="Browse", command=self.select_merge_folder).pack(side=tk.RIGHT, padx=5)
+        
+        tk.Label(main_frame, text="Preview of files to merge:").pack(anchor=tk.W, pady=(10, 0))
+        self.merge_preview = Listbox(main_frame, height=8)
+        self.merge_preview.pack(fill=tk.BOTH, expand=True, pady=2)
+        
+        merge_button_frame = tk.Frame(main_frame)
+        merge_button_frame.pack(fill=tk.X, pady=10)
+        tk.Button(merge_button_frame, text="Scan Files", command=self.scan_merge_files).pack(side=tk.LEFT, padx=5)
+        tk.Button(merge_button_frame, text="Merge Files", command=self.merge_text_files).pack(side=tk.LEFT, padx=5)
+
+    def create_metadata_tab(self, notebook):
+        metadata_frame = tk.Frame(notebook)
+        notebook.add(metadata_frame, text="JPG + TXT Merger")
+        
+        main_frame = tk.Frame(metadata_frame, padx=10, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        instructions = "Embed text into JPEG EXIF metadata. Originals are NOT modified.\nModified files are saved to a '_processed_jpegs' subfolder.\n• Exact match: this.jpg + this.txt\n• Similar names: photo01.jpg + photo01_notes.txt\n\nRequires ExifTool (exiftool.exe) in your system PATH for best compatibility with Windows Explorer."
+        tk.Label(main_frame, text=instructions, justify=tk.LEFT, wraplength=600).pack(anchor=tk.W, pady=(0, 10))
+        
+        tk.Label(main_frame, text="Name Similarity Threshold (0.5-1.0):").pack(anchor=tk.W)
+        self.similarity_scale = tk.Scale(main_frame, from_=0.5, to=1.0, resolution=0.05, orient=tk.HORIZONTAL, length=300)
+        self.similarity_scale.set(self.settings.get("similarity_threshold", 0.8))
+        self.similarity_scale.pack(anchor=tk.W, pady=2)
+
+        tk.Label(main_frame, text="Custom Prefix for Embedded Text (optional):").pack(anchor=tk.W)
+        self.metadata_prefix_var = tk.StringVar(value=self.settings.get("metadata_prefix", ""))
+        tk.Entry(main_frame, textvariable=self.metadata_prefix_var).pack(fill=tk.X, pady=2)
+        
+        self.delete_txt_metadata_var = tk.BooleanVar(value=self.settings.get("delete_txt_after_merge_metadata", False))
+        tk.Checkbutton(main_frame, text="Delete .txt files after embedding into JPEGs", variable=self.delete_txt_metadata_var).pack(anchor=tk.W, pady=5)
+        
+        tk.Label(main_frame, text="Folder Containing JPG and TXT Files:").pack(anchor=tk.W, pady=(10, 0))
+        metadata_folder_frame = tk.Frame(main_frame)
+        metadata_folder_frame.pack(fill=tk.X, pady=5)
+        self.metadata_folder_path = tk.StringVar()
+        tk.Entry(metadata_folder_frame, textvariable=self.metadata_folder_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(metadata_folder_frame, text="Browse", command=self.select_metadata_folder).pack(side=tk.RIGHT, padx=5)
+        
+        tk.Label(main_frame, text="Preview JPG-TXT matches:").pack(anchor=tk.W, pady=(10, 0))
+        self.metadata_preview = scrolledtext.ScrolledText(main_frame, height=10)
+        self.metadata_preview.pack(fill=tk.BOTH, expand=True, pady=2)
+        
+        metadata_button_frame = tk.Frame(main_frame)
+        metadata_button_frame.pack(fill=tk.X, pady=10)
+        tk.Button(metadata_button_frame, text="Scan Matches", command=self.scan_metadata_matches).pack(side=tk.LEFT, padx=5)
+        
+        self.embed_btn = tk.Button(metadata_button_frame, text="Embed Text to JPEGs", command=self.start_embedding_process)
+        self.embed_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.stop_metadata_btn = tk.Button(metadata_button_frame, text="Stop Embedding", command=self.stop_metadata_process, state=tk.DISABLED)
+        self.stop_metadata_btn.pack(side=tk.LEFT, padx=5)
+
+        metadata_progress_frame = tk.Frame(main_frame)
+        metadata_progress_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(metadata_progress_frame, text="Embed Progress:").pack(anchor=tk.W)
+        self.metadata_progress_var = tk.StringVar(value="Ready")
+        tk.Label(metadata_progress_frame, textvariable=self.metadata_progress_var, fg="blue").pack(anchor=tk.W)
+        
+        self.metadata_progress_bar = ttk.Progressbar(metadata_progress_frame, mode='determinate')
+        self.metadata_progress_bar.pack(fill=tk.X, pady=2)
+        
+        self.metadata_current_file_var = tk.StringVar(value="")
+        tk.Label(metadata_progress_frame, textvariable=self.metadata_current_file_var, fg="green", wraplength=580).pack(anchor=tk.W)
+
+    def select_and_process_folder(self):
+        folder = filedialog.askdirectory(title="Select Folder with Images")
+        if folder: self.folder_path.set(folder)
+
+    def select_merge_folder(self):
+        folder = filedialog.askdirectory(title="Select Folder with Text Files to Merge")
+        if folder:
+            self.merge_folder_path.set(folder)
+            self.scan_merge_files()
+
+    def select_metadata_folder(self):
+        folder = filedialog.askdirectory(title="Select Folder with JPG and TXT Files")
+        if folder:
+            self.metadata_folder_path.set(folder)
+            self.scan_metadata_matches()
+
+    def manual_process_folder(self):
+        folder = self.folder_path.get()
+        if not os.path.isdir(folder):
+            messagebox.showwarning("Invalid", "Please select a valid folder.")
+            return
+        if self.is_processing_ocr:
+            messagebox.showwarning("Processing", "Already processing. Please wait or stop current process.")
+            return
+        self.ocr_processing_thread = threading.Thread(target=self.process_folder, args=(folder,))
+        self.ocr_processing_thread.daemon = True
+        self.ocr_processing_thread.start()
+
+    def stop_ocr_process(self):
+        self.stop_processing_ocr = True
+        self.ocr_progress_var.set("Stopping...")
+        self.update_ocr_ui_state(False)
+
+    def stop_metadata_process(self):
+        self.stop_processing_metadata = True
+        self.metadata_progress_var.set("Stopping...")
+        self.update_metadata_ui_state(False)
+
+    def update_ocr_ui_state(self, processing):
+        self.is_processing_ocr = processing
+        state = tk.DISABLED if processing else tk.NORMAL
+        stop_state = tk.NORMAL if processing else tk.DISABLED
+        self.process_btn.config(state=state)
+        self.stop_btn.config(state=stop_state)
+        if not processing and self.stop_processing_ocr:
+            self.ocr_progress_var.set("Process stopped by user")
+            self.ocr_current_file_var.set("")
+            self.ocr_progress_bar['value'] = 0
+
+    def update_metadata_ui_state(self, processing):
+        self.is_processing_metadata = processing
+        state = tk.DISABLED if processing else tk.NORMAL
+        stop_state = tk.NORMAL if processing else tk.DISABLED
+        self.embed_btn.config(state=state)
+        self.stop_metadata_btn.config(state=stop_state)
+        if not processing:
+            if self.stop_processing_metadata:
+                self.metadata_progress_var.set("Process stopped by user")
+                self.metadata_current_file_var.set("")
+                self.metadata_progress_bar['value'] = 0
+            else:
+                self.metadata_progress_var.set("Ready")
+                self.metadata_current_file_var.set("")
+                self.metadata_progress_bar['value'] = 0
+
+    def extract_number_from_filename(self, filename):
+        name = os.path.splitext(filename)[0]
+        numbers = re.findall(r'\d+', name)
+        return int(numbers[-1]) if numbers else float('inf')
+
+    def scan_merge_files(self):
+        folder = self.merge_folder_path.get()
+        if not os.path.isdir(folder): return
+        
+        txt_files = [f for f in os.listdir(folder) if f.lower().endswith('.txt') and re.search(r'\d+', f)]
+        txt_files.sort(key=self.extract_number_from_filename)
+        
+        self.merge_preview.delete(0, tk.END)
+        if txt_files:
+            for txt_file in txt_files: self.merge_preview.insert(tk.END, txt_file)
+        else:
+            self.merge_preview.insert(tk.END, "No numbered text files found")
+
+    def merge_text_files(self):
+        folder = self.merge_folder_path.get()
+        if not os.path.isdir(folder):
+            messagebox.showwarning("Invalid", "Please select a valid folder.")
+            return
+        
+        files_to_merge = [self.merge_preview.get(i) for i in range(self.merge_preview.size()) if self.merge_preview.get(i) != "No numbered text files found"]
+        if not files_to_merge:
+            messagebox.showwarning("No Files", "No files to merge.")
+            return
+        
+        try:
+            output_path = os.path.join(folder, self.merge_output_var.get())
+            custom_name = self.merge_custom_name_var.get().strip()
+            separator = self.separator_var.get()
+            
+            merged_content = []
+            for idx, txt_file in enumerate(files_to_merge, start=1):
+                file_path = os.path.join(folder, txt_file)
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                    entry_parts = [separator, f"{idx:03d}", txt_file]
+                    if custom_name: entry_parts.append(custom_name)
+                    if content: entry_parts.append(content)
+                    merged_content.append('\n'.join(entry_parts))
+                except Exception as e:
+                    merged_content.append(f"{separator}\n{idx:03d}\n{txt_file}\nRead Error: {e}")
+            
+            with open(output_path, 'w', encoding='utf-8') as f: f.write('\n\n'.join(merged_content))
+            
+            deleted_files_count = 0
+            if self.delete_txt_var.get():
+                for txt_file in files_to_merge:
+                    try:
+                        os.remove(os.path.join(folder, txt_file))
+                        deleted_files_count += 1
+                    except Exception as e:
+                        print(f"Could not delete {txt_file}: {e}")
+            
+            success_msg = f"Merged {len(files_to_merge)} files into {self.merge_output_var.get()}"
+            if deleted_files_count > 0: success_msg += f"\nDeleted {deleted_files_count} original files"
+            
+            messagebox.showinfo("Success", success_msg)
+            self.scan_merge_files()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to merge files: {e}")
+
+    def calculate_similarity(self, name1, name2):
+        name1 = os.path.splitext(name1)[0].lower()
+        name2 = os.path.splitext(name2)[0].lower()
+        return SequenceMatcher(None, name1, name2).ratio()
+
+    def scan_metadata_matches(self):
+        folder = self.metadata_folder_path.get()
+        if not os.path.isdir(folder): return []
+        
+        jpg_files = [f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.jpeg'))]
+        txt_files = [f for f in os.listdir(folder) if f.lower().endswith('.txt')]
+        
+        matches = []
+        threshold = self.similarity_scale.get()
+        
+        used_txt_files = set()
+
+        for jpg_file in jpg_files:
+            jpg_base = os.path.splitext(jpg_file)[0].lower()
+            
+            # Prioritize exact match
+            exact_match_found = False
+            for txt_file in txt_files:
+                if txt_file in used_txt_files: continue
+                txt_base = os.path.splitext(txt_file)[0].lower()
+                if jpg_base == txt_base:
+                    matches.append((jpg_file, txt_file, 1.0, "Exact"))
+                    used_txt_files.add(txt_file)
+                    exact_match_found = True
+                    break
+            
+            if exact_match_found: continue
+
+            # Find best similar match if no exact one was found
+            best_match = None
+            best_similarity = 0
+            for txt_file in txt_files:
+                if txt_file in used_txt_files: continue
+                similarity = self.calculate_similarity(jpg_file, txt_file)
+                if similarity >= threshold and similarity > best_similarity:
+                    best_similarity = similarity
+                    best_match = txt_file
+            
+            if best_match:
+                matches.append((jpg_file, best_match, best_similarity, "Similar"))
+                used_txt_files.add(best_match)
+
+        self.metadata_preview.delete('1.0', tk.END)
+        if matches:
+            preview_text = f"Found {len(matches)} JPG-TXT matches to process:\n\n"
+            for jpg, txt, sim, match_type in matches:
+                preview_text += f"• {jpg}  →  {txt}  ({match_type}: {sim:.2f})\n"
+        else:
+            preview_text = "No matching JPG-TXT pairs found.\nTry lowering the similarity threshold or check filenames."
+        
+        self.metadata_preview.insert('1.0', preview_text)
+        return matches
+
+    def start_embedding_process(self):
+        folder = self.metadata_folder_path.get()
+        if not os.path.isdir(folder):
+            messagebox.showwarning("Invalid", "Please select a valid folder.")
+            return
+        
+        if self.is_processing_metadata:
+            messagebox.showwarning("Processing", "Already embedding. Please wait.")
+            return
+        
+        self.metadata_processing_thread = threading.Thread(target=self.embed_text_to_jpegs, args=(folder,))
+        self.metadata_processing_thread.daemon = True
+        self.metadata_processing_thread.start()
+
+    def embed_text_to_jpegs(self, folder):
+        """Embed text content into JPEG EXIF metadata using piexif and exiftool."""
+        try:
+            self.stop_processing_metadata = False
+            self.root.after(0, lambda: self.update_metadata_ui_state(True))
+            
+            matches = self.scan_metadata_matches() # Rescan to get fresh list
+            if not matches:
+                self.root.after(0, lambda: messagebox.showwarning("No Matches", "No JPG-TXT pairs found to process."))
+                self.root.after(0, lambda: self.update_metadata_ui_state(False))
+                return
+
+            # Create output directory
+            output_folder = os.path.join(folder, "_processed_jpegs")
+            os.makedirs(output_folder, exist_ok=True)
+                
+            success_count = 0
+            deleted_files_count = 0
+            error_log = []
+            prefix = self.metadata_prefix_var.get().strip()
+
+            total_files_to_process = len(matches)
+            self.root.after(0, lambda: self.metadata_progress_bar.config(maximum=total_files_to_process))
+            self.root.after(0, lambda: self.metadata_progress_var.set(f"Embedding text into {total_files_to_process} JPEGs..."))
+
+            for idx, (jpg_file, txt_file, _, _) in enumerate(matches, start=1):
+                if self.stop_processing_metadata:
+                    self.root.after(0, lambda: self.metadata_progress_var.set("Processing stopped"))
+                    break
+                    
+                self.root.after(0, lambda f=jpg_file, i=idx, t=total_files_to_process: self.metadata_current_file_var.set(f"({i}/{t}) Processing: {f}"))
+                self.root.after(0, lambda p=idx: self.metadata_progress_bar.config(value=p))
+
+                jpg_path = os.path.join(folder, jpg_file)
+                txt_path = os.path.join(folder, txt_file)
+                output_path = os.path.join(output_folder, jpg_file) # Path for the new, processed JPG
+                temp_jpg_path_for_piexif = os.path.join(output_folder, f"temp_{jpg_file}")
+
+                try:
+                    # Read text content
+                    with open(txt_path, 'r', encoding='utf-8') as f:
+                        text_content = f.read().strip()
+                    if not text_content: 
+                        error_log.append(f"Skipped {jpg_file}: Associated text file {txt_file} is empty.")
+                        continue
+
+                    # Combine prefix and text
+                    final_content = f"{prefix}\n{text_content}" if prefix else text_content
+
+                    # --- PART 1: Use piexif to write to ImageDescription and save to a temporary file ---
+                    # This ensures we get all original EXIF data and can modify it with piexif.
+                    # We save to a temp path first, then exiftool will process this temp file.
+                    
+                    # Load exif data safely
+                    exif_dict = piexif.load(jpg_path) # Load from original JPG
+
+                    # Embed text into ImageDescription field
+                    exif_dict["0th"][piexif.ImageIFD.ImageDescription] = final_content.encode("utf-8")
+                    
+                    # Get the raw exif bytes
+                    exif_bytes = piexif.dump(exif_dict)
+                    
+                    # Save image to a temporary file in the output folder with updated EXIF
+                    img = Image.open(jpg_path)
+                    img.save(temp_jpg_path_for_piexif, exif=exif_bytes)
+
+                    # --- PART 2: Use exiftool to write to Windows/Explorer-compatible Comment tag ---
+                    # And save the final output to the intended output_path.
+                    try:
+                        subprocess.run([
+                            "exiftool",
+                            f"-Comment={final_content}",
+                            "-overwrite_original", 
+                            temp_jpg_path_for_piexif 
+                        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        
+                        # After exiftool overwrites the temp file, rename it to the final output_path
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                        os.rename(temp_jpg_path_for_piexif, output_path)
+
+                    except subprocess.CalledProcessError as sub_e:
+                        error_msg = f"Exiftool error for {jpg_file}: {sub_e.stderr.decode('utf-8', errors='ignore').strip()}"
+                        error_log.append(error_msg)
+                        print(error_msg)
+                        # Clean up temp file if exiftool failed
+                        if os.path.exists(temp_jpg_path_for_piexif):
+                            os.remove(temp_jpg_path_for_piexif)
+                        continue 
+                    except FileNotFoundError:
+                        error_msg = f"ExifTool not found. Please ensure 'exiftool.exe' is in your system PATH to embed Windows Comment for {jpg_file}. Only Exif ImageDescription was written."
+                        error_log.append(error_msg)
+                        print(error_msg)
+                        # If exiftool isn't found, we've still written the ImageDescription with piexif
+                        # so we should move the temp file to the final output path.
+                        if os.path.exists(temp_jpg_path_for_piexif):
+                            if os.path.exists(output_path): os.remove(output_path)
+                            os.rename(temp_jpg_path_for_piexif, output_path)
+                        
+                        # Count it as partially successful (piexif written)
+                        success_count += 1 
+                        continue # Move to next file, having embedded what we could
+
+                    success_count += 1
+                    
+                    # Delete txt file if requested
+                    if self.delete_txt_metadata_var.get():
+                        try:
+                            os.remove(txt_path)
+                            deleted_files_count += 1
+                        except Exception as e:
+                            error_log.append(f"Could not delete {txt_file}: {e}")
+                        
+                except Exception as e:
+                    error_msg = f"Error processing {jpg_file} + {txt_file}: {e}"
+                    error_log.append(error_msg)
+                    print(error_msg) 
+                    # Clean up temp file if an error occurred before exiftool or piexif save
+                    if os.path.exists(temp_jpg_path_for_piexif):
+                        os.remove(temp_jpg_path_for_piexif)
+                    continue
+            
+            if not self.stop_processing_metadata and success_count > 0:
+                summary_message = f"Successfully embedded text into {success_count} JPEG file(s).\nSaved in '{output_folder}'."
+                if deleted_files_count > 0:
+                    summary_message += f"\nDeleted {deleted_files_count} text file(s)."
+                if error_log:
+                    summary_message += f"\n\nEncountered {len(error_log)} error(s):\n" + "\n".join(error_log)
+                    self.root.after(0, lambda: messagebox.showwarning("Completed with Errors", summary_message))
+                else:
+                    self.root.after(0, lambda: messagebox.showinfo("Success", summary_message))
+                    
+                self.root.after(0, lambda: self.metadata_progress_bar.config(value=total_files_to_process))
+                self.root.after(0, lambda: self.metadata_progress_var.set("Complete!"))
+                self.root.after(0, lambda: self.metadata_current_file_var.set(""))
+            
+            elif self.stop_processing_metadata:
+                self.root.after(0, lambda: self.metadata_current_file_var.set(f"Processed {success_count} files before stopping."))
+            
+            self.root.after(0, lambda: self.scan_metadata_matches())  # Refresh preview
+
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Embedding process failed: {e}"))
+            self.root.after(0, lambda: self.metadata_progress_var.set("Error!"))
+
+        finally:
+            self.root.after(0, lambda: self.update_metadata_ui_state(False))
+            self.stop_processing_metadata = False
+
+    def process_folder(self, folder_path):
+        try:
+            self.stop_processing_ocr = False
+            self.root.after(0, lambda: self.update_ocr_ui_state(True))
+            
+            jpg_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.jpeg'))])
+            if not jpg_files:
+                self.root.after(0, lambda: messagebox.showinfo("No Images", "No JPG/JPEG images found."))
+                return
+            
+            total_files = len(jpg_files)
+            self.root.after(0, lambda: self.ocr_progress_bar.config(maximum=total_files))
+            self.root.after(0, lambda: self.ocr_progress_var.set(f"Processing {total_files} images..."))
+
+            combined_entries = []
+            custom_text = self.settings.get("custom_text", "").strip()
+            separator = self.settings.get("custom_separator", "////")
+            include_filename = self.settings.get("include_filename_in_ocr_output", False)
+            
+            for idx, jpg_file in enumerate(jpg_files, start=1):
+                if self.stop_processing_ocr:
+                    self.root.after(0, lambda: self.ocr_progress_var.set("Processing stopped"))
+                    break
+                
+                self.root.after(0, lambda f=jpg_file, i=idx, t=total_files: self.ocr_current_file_var.set(f"({i}/{t}) Processing: {f}"))
+                self.root.after(0, lambda p=idx: self.ocr_progress_bar.config(value=p))
+
+                try:
+                    image_path = os.path.join(folder_path, jpg_file)
+                    ocr_text = self.process_image(image_path)
+                    
+                    entry_parts = [separator, f"{idx:03d}"]
+                    
+                    # Add filename if enabled
+                    if include_filename:
+                        entry_parts.append(jpg_file)
+                    else:
+                        entry_parts.append(os.path.splitext(jpg_file)[0])
+
+                    if custom_text: entry_parts.append(custom_text)
+                    if ocr_text: entry_parts.append(ocr_text)
+                    
+                    combined_entries.append('\n'.join(entry_parts))
+                    
+                except Exception as e:
+                    entry_parts = [separator, f"{idx:03d}"]
+                    if include_filename:
+                         entry_parts.append(jpg_file)
+                    else:
+                         entry_parts.append(os.path.splitext(jpg_file)[0])
+                    if custom_text: entry_parts.append(custom_text)
+                    entry_parts.append(f"OCR Error: {e}")
+                    combined_entries.append('\n'.join(entry_parts))
+
+            if not self.stop_processing_ocr and combined_entries:
+                self.root.after(0, lambda: self.ocr_progress_var.set("Writing output file..."))
+                self.root.after(0, lambda: self.ocr_current_file_var.set("Saving results..."))
+                
+                output_path = os.path.join(folder_path, self.output_name_var.get())
+                try:
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        f.write('\n\n'.join(combined_entries))
+                    
+                    self.root.after(0, lambda: self.ocr_progress_bar.config(value=total_files))
+                    self.root.after(0, lambda: self.ocr_progress_var.set("Complete!"))
+                    self.root.after(0, lambda: self.ocr_current_file_var.set(f"Saved: {self.output_name_var.get()}"))
+                    self.root.after(0, lambda: messagebox.showinfo("Complete", f"Processed {len(combined_entries)} images."))
+                except Exception as e:
+                    self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to write output: {e}"))
+            
+            elif self.stop_processing_ocr:
+                self.root.after(0, lambda: self.ocr_current_file_var.set(f"Processed {len(combined_entries)} files before stopping."))
+
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Processing failed: {e}"))
+        finally:
+            self.root.after(0, lambda: self.update_ocr_ui_state(False))
+            self.stop_processing_ocr = False
+
+    def process_image(self, image_path):
+        try:
+            from numpy import array as np_array
+            import cv2
+            
+            img = Image.open(image_path)
+            
+            if img.mode == 'RGB':
+                img_array = np_array(img)
+                hsv = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
+                h, s, v = cv2.split(hsv)
+                s = cv2.add(s, 40)
+                hsv = cv2.merge([h, s, v])
+                img_array = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+                img = Image.fromarray(img_array)
+            
+            if img.mode != 'L': img = img.convert('L')
+            
+            text = pytesseract.image_to_string(img)
+            
+            # NEW: Apply text filtering if enabled
+            cleaned_text = self.clean_and_filter_text(' '.join(text.split()))
+            
+            return cleaned_text
+            
+        except Exception as e:
+            print(f"Error processing image {image_path}: {e}")
+            return f"OCR Error: {e}"
+
+    def install_context_menu(self):
+        try:
+            script_path = os.path.abspath(sys.argv[0])
+            python_exe = sys.executable
+            keys = [
+                (r"Software\Classes\Directory\shell\MergedOCR", "%1"),
+                (r"Software\Classes\Directory\Background\shell\MergedOCR", "%V")
+            ]
+            for base_key, param in keys:
+                key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, base_key)
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Enhanced OCR & File Merger")
+                command_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"{base_key}\\command")
+                winreg.SetValueEx(command_key, "", 0, winreg.REG_SZ, f'"{python_exe}" "{script_path}" "{param}"')
+            messagebox.showinfo("Success", "Context menu installed successfully.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to install context menu: {e}")
+
+    def uninstall_context_menu(self):
+        try:
+            keys_to_delete = [
+                r"Software\Classes\Directory\shell\MergedOCR\command",
+                r"Software\Classes\Directory\shell\MergedOCR",
+                r"Software\Classes\Directory\Background\shell\MergedOCR\command",
+                r"Software\Classes\Directory\Background\shell\MergedOCR"
+            ]
+            for key in keys_to_delete:
+                try: winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+                except FileNotFoundError: pass
+            messagebox.showinfo("Success", "Context menu uninstalled successfully.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to uninstall context menu: {e}")
+
+if __name__ == "__main__":
+    # --- Dependency Check ---
+    try:
+        import numpy
+        import cv2
+        import piexif
+        import subprocess
+        import tkinter.simpledialog  # NEW: Import for template naming dialog
+    except ImportError as e:
+        tk.Tk().withdraw()
+        if 'piexif' in str(e):
+            messagebox.showerror("Missing Dependency", 
+                               "The 'piexif' library is required for safe metadata editing.\n\nPlease install it by running:\npip install piexif")
+        elif 'numpy' in str(e) or 'cv2' in str(e):
+            messagebox.showerror("Missing Dependencies", 
+                               "Required libraries for image processing (numpy, opencv-python) are missing.\n\nPlease install them by running:\npip install numpy opencv-python")
+        else:
+             messagebox.showerror("Missing Dependencies", 
+                               "Please install required libraries:\npip install opencv-python numpy pytesseract pillow piexif")
+        sys.exit(1)
+    
+    # Check if exiftool is available
+    try:
+        subprocess.run(["exiftool", "-ver"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        tk.Tk().withdraw()
+        messagebox.showwarning("ExifTool Not Found",
+                               "ExifTool (exiftool.exe) was not found in your system PATH.\n\n"
+                               "While the script will still embed text using piexif, the comment may not display in Windows Explorer properties.\n\n"
+                               "For full compatibility, please download ExifTool from https://exiftool.org/ and add its directory to your system PATH.")
+    except Exception as e:
+        tk.Tk().withdraw()
+        messagebox.showwarning("ExifTool Error", f"An error occurred while checking ExifTool: {e}\n"
+                                                "Please ensure ExifTool is correctly installed and accessible.")
+
+    root = tk.Tk()
+    app = MergedOCRApp(root)
+    root.mainloop()
+--------------------------------------------------------------------------------
+--- END: enhanced_ocr_filtered.py ---
+
+
+--- START: file_randomizer_advancedv2.py ---
+--------------------------------------------------------------------------------
+import os
+import sys
+import random
+import string
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from datetime import datetime, timedelta
+import winreg
+import subprocess
+from pathlib import Path
+import json
+import tempfile
+import re
+from collections import defaultdict
+
+class AdvancedFileRandomizer:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Advanced File & Folder Randomizer with Numbering")
+        self.root.geometry("1000x720") # Increased width for new preview column and controls
+        self.root.resizable(True, True)
+        self.root.minsize(800, 600)
+        
+        # --- Internal State ---
+        # This dictionary will hold the data for items in the preview tree
+        # Key: item_id (from treeview), Value: dictionary with item details
+        self.preview_items = {} 
+        self.settings_dir = Path("C:/Scripts/Saved_json")
+
+        # --- Variables for UI ---
+        self.folder_path = tk.StringVar()
+        self.randomize_names = tk.BooleanVar(value=True)
+        self.randomize_dates = tk.BooleanVar(value=True)
+        self.randomize_modified = tk.BooleanVar(value=True)
+        self.preserve_extensions = tk.BooleanVar(value=True)
+        self.randomize_folders = tk.BooleanVar(value=False)
+        self.randomize_folder_dates = tk.BooleanVar(value=False)
+        self.process_subfolders = tk.BooleanVar(value=False)
+        self.min_name_length = tk.IntVar(value=5)
+        self.max_name_length = tk.IntVar(value=15)
+        self.min_folder_length = tk.IntVar(value=5)
+        self.max_folder_length = tk.IntVar(value=15)
+        
+        # Variables for numbering
+        self.enable_numbering = tk.BooleanVar(value=False)
+        self.numbering_mode = tk.StringVar(value="sequential")
+        self.number_format = tk.StringVar(value="001")
+        self.start_number = tk.IntVar(value=1)
+        self.custom_prefix = tk.StringVar(value="File_")
+        self.custom_suffix = tk.StringVar(value="")
+        self.separator = tk.StringVar(value="_")
+        self.number_files = tk.BooleanVar(value=True)
+        self.number_folders = tk.BooleanVar(value=False)
+        
+        # Advanced features
+        self.filter_by_extension = tk.BooleanVar(value=False)
+        self.extension_filter = tk.StringVar(value=".txt,.jpg,.png,.pdf")
+        self.sort_before_numbering = tk.BooleanVar(value=True)
+        self.sort_method = tk.StringVar(value="name")
+        self.backup_original_names = tk.BooleanVar(value=True)
+        self.date_range_start = tk.StringVar(value="2019-01-01")
+        self.date_range_end = tk.StringVar(value="2024-12-31")
+        
+        # Get script path for context menu
+        if getattr(sys, 'frozen', False):
+            self.script_path = sys.executable
+        else:
+            self.script_path = os.path.abspath(__file__)
+            
+        self.setup_gui()
+        self.auto_load_settings()
+
+    def setup_gui(self):
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Main tab
+        self.main_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.main_tab, text="Main Operations")
+        
+        # Numbering tab
+        self.numbering_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.numbering_tab, text="Numbering System")
+        
+        # Advanced tab
+        self.advanced_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.advanced_tab, text="Advanced Features")
+        
+        # Context menu tab
+        self.context_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.context_tab, text="Context Menu")
+        
+        self.setup_main_tab()
+        self.setup_numbering_tab()
+        self.setup_advanced_tab()
+        self.setup_context_tab()
+        
+        # Status bar
+        self.status_label = ttk.Label(self.root, text="Ready", relief=tk.SUNKEN)
+        self.status_label.pack(fill=tk.X, side=tk.BOTTOM)
+        
+    def setup_main_tab(self):
+        main_frame = ttk.Frame(self.main_tab, padding="5")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Folder selection
+        folder_frame = ttk.Frame(main_frame)
+        folder_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(folder_frame, text="Folder:").pack(side=tk.LEFT)
+        ttk.Entry(folder_frame, textvariable=self.folder_path, width=50).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        ttk.Button(folder_frame, text="Browse", command=self.browse_folder).pack(side=tk.RIGHT)
+        
+        # Two column layout
+        columns_frame = ttk.Frame(main_frame)
+        columns_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Left column - File options
+        left_frame = ttk.LabelFrame(columns_frame, text="File Randomization", padding="5")
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
+        
+        ttk.Checkbutton(left_frame, text="Randomize filenames", variable=self.randomize_names).pack(anchor=tk.W)
+        ttk.Checkbutton(left_frame, text="Randomize creation dates", variable=self.randomize_dates).pack(anchor=tk.W)
+        ttk.Checkbutton(left_frame, text="Randomize modified dates", variable=self.randomize_modified).pack(anchor=tk.W)
+        ttk.Checkbutton(left_frame, text="Preserve file extensions", variable=self.preserve_extensions).pack(anchor=tk.W)
+        
+        length_frame = ttk.Frame(left_frame)
+        length_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(length_frame, text="Name length:").pack(side=tk.LEFT)
+        ttk.Spinbox(length_frame, from_=1, to=30, width=4, textvariable=self.min_name_length).pack(side=tk.LEFT, padx=2)
+        ttk.Label(length_frame, text="to").pack(side=tk.LEFT)
+        ttk.Spinbox(length_frame, from_=1, to=30, width=4, textvariable=self.max_name_length).pack(side=tk.LEFT, padx=2)
+        
+        # Right column - Folder options
+        right_frame = ttk.LabelFrame(columns_frame, text="Folder Options", padding="5")
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(2, 0))
+        
+        ttk.Checkbutton(right_frame, text="Randomize folder names", variable=self.randomize_folders).pack(anchor=tk.W)
+        ttk.Checkbutton(right_frame, text="Randomize folder dates", variable=self.randomize_folder_dates).pack(anchor=tk.W)
+        ttk.Checkbutton(right_frame, text="Process subfolders", variable=self.process_subfolders).pack(anchor=tk.W)
+        
+        folder_length_frame = ttk.Frame(right_frame)
+        folder_length_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(folder_length_frame, text="Name length:").pack(side=tk.LEFT)
+        ttk.Spinbox(folder_length_frame, from_=1, to=30, width=4, textvariable=self.min_folder_length).pack(side=tk.LEFT, padx=2)
+        ttk.Label(folder_length_frame, text="to").pack(side=tk.LEFT)
+        ttk.Spinbox(folder_length_frame, from_=1, to=30, width=4, textvariable=self.max_folder_length).pack(side=tk.LEFT, padx=2)
+        
+        # --- NEW: Preview using Treeview for columns ---
+        preview_frame = ttk.LabelFrame(main_frame, text="Items Preview", padding="5")
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        tree_container = ttk.Frame(preview_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.preview_tree = ttk.Treeview(tree_container, columns=("original", "new", "type", "size"), show="headings", height=8)
+        
+        self.preview_tree.heading("original", text="Original Name")
+        self.preview_tree.heading("new", text="New Name (Preview)")
+        self.preview_tree.heading("type", text="Type") # New column for file/folder type
+        self.preview_tree.heading("size", text="Size")
+        
+        self.preview_tree.column("original", width=250, stretch=tk.YES)
+        self.preview_tree.column("new", width=250, stretch=tk.YES)
+        self.preview_tree.column("type", width=80, stretch=tk.NO) # Adjusted width
+        self.preview_tree.column("size", width=100, stretch=tk.NO)
+        
+        v_scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=self.preview_tree.yview)
+        h_scrollbar = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL, command=self.preview_tree.xview)
+        self.preview_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        
+        self.preview_tree.grid(row=0, column=0, sticky="nsew")
+        v_scrollbar.grid(row=0, column=1, sticky="ns")
+        h_scrollbar.grid(row=1, column=0, sticky="ew")
+        
+        tree_container.grid_columnconfigure(0, weight=1)
+        tree_container.grid_rowconfigure(0, weight=1)
+
+        # Preview buttons
+        preview_buttons = ttk.Frame(preview_frame)
+        preview_buttons.pack(fill=tk.X, pady=(5,0))
+        ttk.Button(preview_buttons, text="Load/Refresh Items", command=self.load_items_to_preview).pack(side=tk.LEFT, padx=2)
+        ttk.Button(preview_buttons, text="Preview Changes", command=self.preview_changes).pack(side=tk.LEFT, padx=2)
+        ttk.Button(preview_buttons, text="Remove Selected", command=self.remove_selected_from_preview).pack(side=tk.LEFT, padx=2)
+        
+        # --- NEW: Edit buttons for selected items ---
+        ttk.Button(preview_buttons, text="Edit Selected Name", command=self.edit_selected_name).pack(side=tk.LEFT, padx=2)
+        ttk.Button(preview_buttons, text="Edit Selected Number", command=self.edit_selected_number).pack(side=tk.LEFT, padx=2)
+
+        # --- NEW: File Type Filters ---
+        filter_frame = ttk.LabelFrame(preview_frame, text="Filter by Type", padding="5")
+        filter_frame.pack(fill=tk.X, pady=5)
+
+        filter_buttons_row1 = ttk.Frame(filter_frame)
+        filter_buttons_row1.pack(fill=tk.X, pady=2)
+        ttk.Button(filter_buttons_row1, text="Show All Files", command=lambda: self.filter_preview_by_type("all_files")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filter_buttons_row1, text="Show Folders Only", command=lambda: self.filter_preview_by_type("folders")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filter_buttons_row1, text=".txt", command=lambda: self.filter_preview_by_type(".txt")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filter_buttons_row1, text=".log", command=lambda: self.filter_preview_by_type(".log")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filter_buttons_row1, text=".pdf", command=lambda: self.filter_preview_by_type(".pdf")).pack(side=tk.LEFT, padx=2)
+
+        filter_buttons_row2 = ttk.Frame(filter_frame)
+        filter_buttons_row2.pack(fill=tk.X, pady=2)
+        ttk.Button(filter_buttons_row2, text=".jpg", command=lambda: self.filter_preview_by_type(".jpg")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filter_buttons_row2, text=".png", command=lambda: self.filter_preview_by_type(".png")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filter_buttons_row2, text=".gif", command=lambda: self.filter_preview_by_type(".gif")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filter_buttons_row2, text=".mp4", command=lambda: self.filter_preview_by_type(".mp4")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filter_buttons_row2, text=".mp3", command=lambda: self.filter_preview_by_type(".mp3")).pack(side=tk.LEFT, padx=2)
+
+
+        # Action buttons
+        action_button_frame = ttk.Frame(main_frame)
+        action_button_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Button(action_button_frame, text="Apply Changes", command=self.apply_changes).pack(side=tk.LEFT, padx=2)
+        
+    def setup_numbering_tab(self):
+        numbering_frame = ttk.Frame(self.numbering_tab, padding="5")
+        numbering_frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Checkbutton(numbering_frame, text="Enable Numbering System", 
+                       variable=self.enable_numbering, command=self.toggle_numbering).pack(anchor=tk.W, pady=2)
+        
+        self.numbering_options_frame = ttk.LabelFrame(numbering_frame, text="Numbering Options", padding="5")
+        self.numbering_options_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        mode_frame = ttk.Frame(self.numbering_options_frame)
+        mode_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(mode_frame, text="Mode:").pack(side=tk.LEFT)
+        ttk.Radiobutton(mode_frame, text="Sequential", variable=self.numbering_mode, value="sequential").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(mode_frame, text="Random Order", variable=self.numbering_mode, value="random").pack(side=tk.LEFT, padx=5)
+        
+        format_frame = ttk.Frame(self.numbering_options_frame)
+        format_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(format_frame, text="Format:").pack(side=tk.LEFT)
+        format_combo = ttk.Combobox(format_frame, textvariable=self.number_format, width=10,
+                                  values=["1", "01", "001", "0001", "A", "a", "I", "i"])
+        format_combo.pack(side=tk.LEFT, padx=5)
+        ttk.Label(format_frame, text="Start:").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Spinbox(format_frame, from_=0, to=9999, width=6, textvariable=self.start_number).pack(side=tk.LEFT, padx=2)
+        
+        pattern_frame = ttk.LabelFrame(self.numbering_options_frame, text="Naming Pattern", padding="5")
+        pattern_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(pattern_frame, text="Prefix:").pack(side=tk.LEFT)
+        ttk.Entry(pattern_frame, textvariable=self.custom_prefix, width=20).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        ttk.Label(pattern_frame, text="Separator:").pack(side=tk.LEFT)
+        sep_combo = ttk.Combobox(pattern_frame, textvariable=self.separator, width=5, values=["_", "-", ".", " ", ""])
+        sep_combo.pack(side=tk.LEFT, padx=5)
+        ttk.Label(pattern_frame, text="Suffix:").pack(side=tk.LEFT)
+        ttk.Entry(pattern_frame, textvariable=self.custom_suffix, width=20).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        
+        apply_frame = ttk.Frame(self.numbering_options_frame)
+        apply_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(apply_frame, text="Apply to:").pack(side=tk.LEFT)
+        ttk.Checkbutton(apply_frame, text="Files", variable=self.number_files).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(apply_frame, text="Folders", variable=self.number_folders).pack(side=tk.LEFT, padx=5)
+        
+        preview_frame = ttk.LabelFrame(self.numbering_options_frame, text="Preview", padding="5")
+        preview_frame.pack(fill=tk.X, pady=5)
+        self.preview_label = ttk.Label(preview_frame, text="Example: File_001.txt, File_002.txt, ...")
+        self.preview_label.pack(anchor=tk.W)
+        ttk.Button(preview_frame, text="Update Preview", command=self.update_numbering_preview).pack(anchor=tk.W, pady=2)
+        
+        self.toggle_numbering()
+
+    def setup_advanced_tab(self):
+        advanced_frame = ttk.Frame(self.advanced_tab, padding="5")
+        advanced_frame.pack(fill=tk.BOTH, expand=True)
+        
+        filter_frame = ttk.LabelFrame(advanced_frame, text="File Filtering", padding="5")
+        filter_frame.pack(fill=tk.X, pady=2)
+        ttk.Checkbutton(filter_frame, text="Filter by extension", variable=self.filter_by_extension).pack(anchor=tk.W)
+        ext_frame = ttk.Frame(filter_frame)
+        ext_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(ext_frame, text="Extensions:").pack(side=tk.LEFT)
+        ttk.Entry(ext_frame, textvariable=self.extension_filter, width=30).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        sort_frame = ttk.LabelFrame(advanced_frame, text="Sorting Options", padding="5")
+        sort_frame.pack(fill=tk.X, pady=2)
+        ttk.Checkbutton(sort_frame, text="Sort before numbering", variable=self.sort_before_numbering).pack(anchor=tk.W)
+        sort_method_frame = ttk.Frame(sort_frame)
+        sort_method_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(sort_method_frame, text="Sort by:").pack(side=tk.LEFT)
+        sort_combo = ttk.Combobox(sort_method_frame, textvariable=self.sort_method, width=15,
+                                values=["name", "size", "date_modified", "date_created", "extension"])
+        sort_combo.pack(side=tk.LEFT, padx=5)
+        
+        date_frame = ttk.LabelFrame(advanced_frame, text="Date Range for Randomization", padding="5")
+        date_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(date_frame, text="Start Date:").pack(side=tk.LEFT)
+        ttk.Entry(date_frame, textvariable=self.date_range_start, width=12).pack(side=tk.LEFT, padx=5)
+        ttk.Label(date_frame, text="End Date:").pack(side=tk.LEFT)
+        ttk.Entry(date_frame, textvariable=self.date_range_end, width=12).pack(side=tk.LEFT, padx=5)
+        
+        backup_frame = ttk.LabelFrame(advanced_frame, text="Backup & Safety", padding="5")
+        backup_frame.pack(fill=tk.X, pady=2)
+        ttk.Checkbutton(backup_frame, text="Create backup of original names", variable=self.backup_original_names).pack(anchor=tk.W)
+        
+        batch_frame = ttk.LabelFrame(advanced_frame, text="Batch Operations", padding="5")
+        batch_frame.pack(fill=tk.X, pady=2)
+        ttk.Button(batch_frame, text="Save Settings", command=self.save_settings).pack(side=tk.LEFT, padx=2)
+        ttk.Button(batch_frame, text="Load Settings", command=self.load_settings).pack(side=tk.LEFT, padx=2)
+        ttk.Button(batch_frame, text="Reset All", command=self.reset_settings).pack(side=tk.LEFT, padx=2)
+        
+    def setup_context_tab(self):
+        context_frame = ttk.Frame(self.context_tab, padding="10")
+        context_frame.pack(fill=tk.BOTH, expand=True)
+        
+        info_text = ("Right-click context menu integration allows you to quickly access this tool "
+                    "from Windows Explorer. You can right-click on any folder or empty space in "
+                    "a folder to access the randomizer.")
+        ttk.Label(context_frame, text=info_text, wraplength=600, justify=tk.LEFT).pack(pady=10)
+        
+        button_frame = ttk.Frame(context_frame)
+        button_frame.pack(pady=10)
+        ttk.Button(button_frame, text="Install Context Menu", command=self.install_context_menu).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Uninstall Context Menu", command=self.uninstall_context_menu).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Check Status", command=self.check_context_menu_status).pack(side=tk.LEFT, padx=5)
+
+    def browse_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.folder_path.set(folder)
+            self.load_items_to_preview()
+
+    def load_items_to_preview(self):
+        # Clear existing items
+        for i in self.preview_tree.get_children():
+            self.preview_tree.delete(i)
+        self.preview_items.clear()
+        
+        folder = self.folder_path.get()
+        if not folder or not os.path.exists(folder):
+            self.status_label.config(text="Please select a valid folder")
+            return
+            
+        if self.process_subfolders.get():
+            messagebox.showwarning("Warning", "Preview and selective removal are disabled when 'Process subfolders' is checked.\nChanges will be applied recursively.")
+            self.status_label.config(text="Subfolder mode: Preview disabled.")
+            return
+
+        try:
+            items_to_sort = []
+            for item_name in os.listdir(folder):
+                item_path = os.path.join(folder, item_name)
+                is_folder = os.path.isdir(item_path)
+
+                if not is_folder and self.filter_by_extension.get():
+                    ext = os.path.splitext(item_name)[1].lower()
+                    allowed_exts = [e.strip().lower() for e in self.extension_filter.get().split(',')]
+                    if ext not in allowed_exts:
+                        continue
+                
+                size_str = self.format_size(os.path.getsize(item_path)) if not is_folder else "" # Size only for files
+                item_type = "Folder" if is_folder else os.path.splitext(item_name)[1].lower() # Type is extension for files
+                if not item_type: item_type = "File" # For files without extension
+                
+                items_to_sort.append({
+                    "name": item_name,
+                    "path": item_path,
+                    "is_folder": is_folder,
+                    "size_str": size_str,
+                    "type_str": item_type, # Store the type string
+                    "new_name": "" # Initialize new_name for preview
+                })
+
+            # Sort if requested
+            if self.sort_before_numbering.get():
+                items_to_sort.sort(key=lambda x: self.get_sort_key(x["path"], x["is_folder"]))
+
+            # Populate treeview
+            for item_data in items_to_sort:
+                item_id = self.preview_tree.insert("", tk.END, values=(item_data["name"], item_data["new_name"], item_data["type_str"], item_data["size_str"]))
+                self.preview_items[item_id] = item_data
+            
+            self.status_label.config(text=f"Loaded {len(self.preview_items)} items. Ready for preview.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to read folder: {str(e)}")
+            
+    def remove_selected_from_preview(self):
+        selected_items = self.preview_tree.selection()
+        if not selected_items:
+            messagebox.showwarning("No Selection", "Please select items in the list to remove.")
+            return
+
+        for item_id in selected_items:
+            self.preview_tree.delete(item_id)
+            if item_id in self.preview_items:
+                del self.preview_items[item_id]
+        
+        self.status_label.config(text=f"Removed items. {len(self.preview_items)} items remaining.")
+
+    def preview_changes(self):
+        if not self.preview_items:
+            messagebox.showwarning("No Items", "Please load items into the preview list first.")
+            return
+
+        all_item_ids = self.preview_tree.get_children()
+        
+        # Create separate lists for files and folders to handle numbering/randomization order
+        files_to_process = []
+        folders_to_process = []
+        for iid in all_item_ids:
+            item = self.preview_items[iid]
+            # Reset new_name for a fresh preview calculation
+            item['new_name'] = "" 
+            if item['is_folder']:
+                folders_to_process.append(item)
+            else:
+                files_to_process.append(item)
+
+        # --- Handle numbering ---
+        if self.enable_numbering.get():
+            if self.numbering_mode.get() == 'random':
+                random.shuffle(files_to_process)
+                random.shuffle(folders_to_process)
+            
+            current_number = self.start_number.get()
+            
+            # Number folders
+            if self.number_folders.get():
+                for item in folders_to_process:
+                    item['new_name'] = self.generate_numbered_name(item['name'], current_number, is_folder=True)
+                    current_number += 1
+
+            # Number files
+            if self.number_files.get():
+                for item in files_to_process:
+                    item['new_name'] = self.generate_numbered_name(item['name'], current_number, is_folder=False)
+                    current_number += 1
+
+        # --- Handle randomization (for items not already numbered or if numbering is off) ---
+        # Note: If numbering is enabled, and an item is numbered, randomization is skipped for that item.
+        if self.randomize_folders.get():
+            for item in folders_to_process:
+                if not item['new_name']: # Only randomize if not already numbered
+                    item['new_name'] = self.generate_random_name(item['name'], is_folder=True)
+        
+        if self.randomize_names.get():
+            for item in files_to_process:
+                if not item['new_name']: # Only randomize if not already numbered
+                    item['new_name'] = self.generate_random_name(item['name'], is_folder=False)
+
+        # --- Update the Treeview ---
+        # Check for potential name collisions in the preview
+        new_name_counts = defaultdict(int)
+        for iid in all_item_ids:
+            item = self.preview_items[iid]
+            if item.get('new_name'): # Only count if a new name was generated
+                new_name_counts[item['new_name'].lower()] += 1
+
+        # Update tree and handle collisions in preview (by adding a temporary suffix)
+        for iid in all_item_ids:
+            item = self.preview_items[iid]
+            new_name = item.get('new_name', "")
+            
+            # If no new name was generated (e.g., randomization/numbering off for this type), use original
+            if not new_name:
+                new_name = item['name']
+                item['new_name'] = new_name # Ensure new_name is set for consistency
+
+            # Apply temporary collision suffix for preview if needed
+            if new_name_counts[new_name.lower()] > 1:
+                # Add a suffix to distinguish duplicates in the preview
+                name, ext = os.path.splitext(new_name)
+                # Ensure the temporary suffix doesn't conflict with actual file names
+                temp_suffix = f"__DUP{random.randint(100, 999)}"
+                new_name_final_for_preview = f"{name}{temp_suffix}{ext}"
+                self.preview_tree.set(iid, "new", new_name_final_for_preview)
+            else:
+                self.preview_tree.set(iid, "new", new_name)
+
+        self.status_label.config(text="Preview generated. Review the 'New Name' column.")
+
+    def apply_changes(self):
+        folder = self.folder_path.get()
+        if not folder or not os.path.exists(folder):
+            messagebox.showerror("Error", "Please select a valid folder")
+            return
+            
+        # If processing subfolders, use the original recursive logic
+        if self.process_subfolders.get():
+            self.apply_changes_recursively()
+            return
+        
+        # --- Apply changes based on the preview tree ---
+        item_ids = self.preview_tree.get_children()
+        if not item_ids:
+            messagebox.showwarning("No Items", "There are no items to process.")
+            return
+
+        if not messagebox.askyesno("Confirm Changes", f"You are about to rename/modify {len(item_ids)} items in:\n{folder}\n\nThis action cannot be undone. Proceed?"):
+            return
+
+        self.create_backup(folder)
+        processed_count = 0
+        errors = []
+        
+        # We process in reverse order of name to avoid conflicts if renaming 'a' to 'b' and 'b' to 'c'
+        # This sorting is based on the ORIGINAL name, which is safer for actual file system operations.
+        sorted_item_ids = sorted(item_ids, key=lambda iid: self.preview_items[iid]['name'].lower(), reverse=True)
+
+        for iid in sorted_item_ids:
+            item_data = self.preview_items[iid]
+            original_path = item_data['path']
+            # Get the *actual* new name from the item_data, not the potentially temp-suffixed one from treeview
+            new_name_from_preview = item_data.get('new_name', item_data['name']) 
+            
+            try:
+                # --- 1. Rename file/folder ---
+                # Only rename if the new name is different from the original name
+                if new_name_from_preview and new_name_from_preview != item_data['name']:
+                    new_path = os.path.join(folder, new_name_from_preview)
+                    
+                    # Ensure the new path is unique before renaming (for actual file system)
+                    counter = 1
+                    final_new_path = new_path
+                    while os.path.exists(final_new_path):
+                        name, ext = os.path.splitext(new_name_from_preview)
+                        final_new_name_unique = f"{name}_conflict{counter}{ext}"
+                        final_new_path = os.path.join(folder, final_new_name_unique)
+                        counter += 1
+
+                    os.rename(original_path, final_new_path)
+                    current_path = final_new_path
+                else:
+                    current_path = original_path
+
+                # --- 2. Change dates ---
+                is_folder = item_data['is_folder']
+                if (not is_folder and (self.randomize_dates.get() or self.randomize_modified.get())) or \
+                   (is_folder and self.randomize_folder_dates.get()):
+                    
+                    creation_time = self.generate_random_date() if (self.randomize_dates.get() and not is_folder) or (self.randomize_folder_dates.get() and is_folder) else datetime.now()
+                    modified_time = self.generate_random_date() if (self.randomize_modified.get() and not is_folder) or (self.randomize_folder_dates.get() and is_folder) else datetime.now()
+                    self.set_file_times(current_path, creation_time, modified_time)
+                
+                processed_count += 1
+            except Exception as e:
+                errors.append(f"Failed '{item_data['name']}' to '{new_name_from_preview}': {e}")
+
+        # --- Final report ---
+        message = f"Operation complete!\nProcessed {processed_count} items."
+        if errors:
+            message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:5])
+            if len(errors) > 5:
+                message += f"\n... and {len(errors) - 5} more errors."
+        
+        messagebox.showinfo("Results", message)
+        self.load_items_to_preview() # Refresh the list
+
+    def apply_changes_recursively(self):
+        """ Fallback to original logic when processing subfolders """
+        if messagebox.askyesno("Confirm Recursive Changes", "You are about to apply changes to this folder AND ALL ITS SUBFOLDERS.\nThis can affect many files and cannot be undone.\n\nAre you sure you want to proceed?"):
+            self.randomize_files() # This was the original entry point for recursive ops
+
+    def format_size(self, size):
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} TB"
+    
+    def get_sort_key(self, file_path, is_folder):
+        sort_method = self.sort_method.get()
+        try:
+            if sort_method == "name":
+                return os.path.basename(file_path).lower()
+            if sort_method == "size" and not is_folder:
+                return os.path.getsize(file_path)
+            if sort_method == "date_modified":
+                return os.path.getmtime(file_path)
+            if sort_method == "date_created":
+                return os.path.getctime(file_path)
+            if sort_method == "extension" and not is_folder:
+                return os.path.splitext(file_path)[1].lower()
+        except OSError: # Handle cases where file might be moved/deleted
+            pass
+        return os.path.basename(file_path).lower()
+
+    def generate_random_name(self, original_name, is_folder=False):
+        if not is_folder and self.preserve_extensions.get():
+            name, ext = os.path.splitext(original_name)
+        else:
+            ext = ""
+        length = random.randint(self.min_folder_length.get() if is_folder else self.min_name_length.get(),
+                                self.max_folder_length.get() if is_folder else self.max_name_length.get())
+        chars = string.ascii_letters + string.digits
+        return ''.join(random.choice(chars) for _ in range(length)) + ext
+    
+    def generate_numbered_name(self, original_name, number, is_folder=False):
+        if not is_folder and self.preserve_extensions.get():
+            _, ext = os.path.splitext(original_name)
+        else:
+            ext = ""
+        
+        format_str = self.number_format.get()
+        if format_str.isdigit(): formatted_number = str(number).zfill(len(format_str))
+        elif format_str == "A": formatted_number = self.number_to_alpha(number, upper=True)
+        elif format_str == "a": formatted_number = self.number_to_alpha(number, upper=False)
+        elif format_str == "I": formatted_number = self.number_to_roman(number, upper=True)
+        elif format_str == "i": formatted_number = self.number_to_roman(number, upper=False)
+        else: formatted_number = str(number)
+        
+        parts = [p for p in [self.custom_prefix.get(), formatted_number, self.custom_suffix.get()] if p]
+        return self.separator.get().join(parts) + ext
+
+    def number_to_alpha(self, num, upper=True):
+        result = ""
+        base = 65 if upper else 97
+        while num > 0:
+            num, rem = divmod(num - 1, 26)
+            result = chr(base + rem) + result
+        return result or ("A" if upper else "a")
+    
+    def number_to_roman(self, num, upper=True):
+        val_map = [(1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), 
+                   (90, "XC"), (50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")]
+        result = ""
+        for val, sym in val_map:
+            while num >= val:
+                result += sym
+                num -= val
+        return result if upper else result.lower()
+    
+    def generate_random_date(self):
+        try:
+            start_date = datetime.strptime(self.date_range_start.get(), "%Y-%m-%d")
+            end_date = datetime.strptime(self.date_range_end.get(), "%Y-%m-%d")
+            delta = end_date - start_date
+            return start_date + timedelta(seconds=random.randint(0, int(delta.total_seconds())))
+        except (ValueError, TypeError):
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=365 * 5)
+            delta = end_date - start_date
+            return start_date + timedelta(seconds=random.randint(0, int(delta.total_seconds())))
+        
+    def set_file_times(self, filepath, creation_time, modified_time):
+        try:
+            os.utime(filepath, (modified_time.timestamp(), modified_time.timestamp()))
+            if sys.platform == 'win32':
+                # More robust method for setting creation time on Windows
+                subprocess.run(['powershell', '-command', f'(Get-Item "{filepath}").CreationTime=("{(creation_time.isoformat())}")'], check=True, capture_output=True)
+        except Exception as e:
+            print(f"Warning: Could not set file times for {os.path.basename(filepath)}: {e}")
+    
+    def create_backup(self, folder_path):
+        if not self.backup_original_names.get(): return
+        try:
+            backup_file = os.path.join(folder_path, f"filename_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+            backup_data = {}
+            for item in os.listdir(folder_path):
+                item_path = os.path.join(folder_path, item)
+                backup_data[item] = {
+                    'is_folder': os.path.isdir(item_path),
+                    'size': os.path.getsize(item_path) if os.path.isfile(item_path) else 0,
+                    'modified': os.path.getmtime(item_path),
+                    'created': os.path.getctime(item_path)
+                }
+            with open(backup_file, 'w') as f: json.dump(backup_data, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not create backup: {e}")
+    
+    def randomize_files(self):
+        """Apply randomization recursively (original method for subfolder processing)"""
+        folder = self.folder_path.get()
+        if not folder or not os.path.exists(folder):
+            messagebox.showerror("Error", "Please select a valid folder")
+            return
+        
+        self.create_backup(folder)
+        processed_files, processed_folders, errors = [0], [0], []
+        self._randomize_folder_recursive(folder, errors, processed_files, processed_folders)
+        
+        message = f"Recursive Randomization complete!\nProcessed {processed_files[0]} files and {processed_folders[0]} folders"
+        if errors:
+            message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:5])
+        messagebox.showinfo("Results", message)
+        self.load_items_to_preview()
+
+    def _randomize_folder_recursive(self, folder_path, errors, processed_files, processed_folders):
+        try:
+            items = os.listdir(folder_path)
+            for item in items:
+                original_path = os.path.join(folder_path, item)
+                if os.path.isdir(original_path) and self.process_subfolders.get():
+                    self._randomize_folder_recursive(original_path, errors, processed_files, processed_folders)
+            
+            # Process items after recursion to avoid renaming a folder before processing its contents
+            for item in items:
+                original_path = os.path.join(folder_path, item)
+                try:
+                    if os.path.isfile(original_path):
+                        # Apply file operations
+                        new_name = self.generate_random_name(item, is_folder=False) if self.randomize_names.get() else item
+                        new_path = os.path.join(folder_path, new_name)
+                        os.rename(original_path, new_path)
+                        
+                        if self.randomize_dates.get() or self.randomize_modified.get():
+                            self.set_file_times(new_path, self.generate_random_date(), self.generate_random_date())
+                        processed_files[0] += 1
+                    
+                    elif os.path.isdir(original_path):
+                        # Apply folder operations
+                        new_name = self.generate_random_name(item, is_folder=True) if self.randomize_folders.get() else item
+                        new_path = os.path.join(folder_path, new_name)
+                        if new_name != item: os.rename(original_path, new_path)
+
+                        if self.randomize_folder_dates.get():
+                            self.set_file_times(new_path, self.generate_random_date(), self.generate_random_date())
+                        processed_folders[0] += 1
+
+                except Exception as e: errors.append(f"Failed '{item}': {e}")
+        except Exception as e: errors.append(f"Error in folder '{folder_path}': {e}")
+
+    def update_numbering_preview(self):
+        try:
+            start_num = self.start_number.get()
+            examples = [self.generate_numbered_name("example.txt", start_num + i) for i in range(3)]
+            self.preview_label.config(text=f"Examples: {', '.join(examples)}, ...")
+        except Exception:
+            self.preview_label.config(text="Preview error - check settings")
+    
+    def save_settings(self):
+        self.settings_dir.mkdir(parents=True, exist_ok=True)
+        filename = filedialog.asksaveasfilename(
+            initialdir=self.settings_dir,
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
+            title="Save Settings"
+        )
+        if not filename: return
+            
+        settings = {k: v.get() for k, v in self.__dict__.items() if isinstance(v, tk.Variable)}
+        try:
+            with open(filename, 'w') as f: json.dump(settings, f, indent=2)
+            messagebox.showinfo("Success", "Settings saved successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save settings: {e}")
+    
+    def load_settings(self):
+        self.settings_dir.mkdir(parents=True, exist_ok=True)
+        filename = filedialog.askopenfilename(
+            initialdir=self.settings_dir,
+            filetypes=[("JSON files", "*.json")],
+            title="Load Settings"
+        )
+        if filename:
+            self._load_settings_from_path(filename)
+            
+    def _load_settings_from_path(self, filepath):
+        try:
+            with open(filepath, 'r') as f: settings = json.load(f)
+            for key, value in settings.items():
+                if hasattr(self, key) and isinstance(getattr(self, key), tk.Variable):
+                    getattr(self, key).set(value)
+            self.toggle_numbering()
+            messagebox.showinfo("Success", f"Settings loaded from {os.path.basename(filepath)}!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load settings: {e}")
+
+    def auto_load_settings(self):
+        self.settings_dir.mkdir(parents=True, exist_ok=True)
+        default_settings_file = self.settings_dir / "file_randomizer_advancedv2.json"
+        if default_settings_file.exists():
+            print(f"Found default settings at {default_settings_file}, loading...")
+            try:
+                with open(default_settings_file, 'r') as f: settings = json.load(f)
+                for key, value in settings.items():
+                    if hasattr(self, key) and isinstance(getattr(self, key), tk.Variable):
+                        getattr(self, key).set(value)
+                self.toggle_numbering()
+                self.status_label.config(text="Default settings loaded automatically.")
+            except Exception as e:
+                self.status_label.config(text=f"Error loading default settings: {e}")
+        else:
+             print(f"No default settings file found at {default_settings_file}")
+
+    def reset_settings(self):
+        if messagebox.askyesno("Confirm Reset", "Are you sure you want to reset all settings?"):
+            # Re-initialize to reset all tk.Variables to their default values
+            self.__init__() # This is a bit of a shortcut, but effective here
+            messagebox.showinfo("Success", "Settings reset to defaults!")
+
+    def toggle_numbering(self):
+        state = tk.NORMAL if self.enable_numbering.get() else tk.DISABLED
+        for child in self.numbering_options_frame.winfo_children():
+            self._set_state_recursive(child, state)
+            
+    def _set_state_recursive(self, widget, state):
+        try: widget.configure(state=state)
+        except tk.TclError: pass
+        for child in widget.winfo_children(): self._set_state_recursive(child, state)
+
+    # --- NEW: Edit Name and Number Functions ---
+    def edit_selected_name(self):
+        selected_items = self.preview_tree.selection()
+        if not selected_items:
+            messagebox.showwarning("No Selection", "Please select an item to edit its name.")
+            return
+        if len(selected_items) > 1:
+            messagebox.showwarning("Multiple Selection", "Please select only one item to edit its name.")
+            return
+
+        item_id = selected_items[0]
+        item_data = self.preview_items[item_id]
+        current_new_name = self.preview_tree.set(item_id, "new")
+        original_name = item_data['name']
+
+        # Create a Toplevel window for editing
+        edit_window = tk.Toplevel(self.root)
+        edit_window.title("Edit New Name")
+        edit_window.transient(self.root) # Make it appear on top of the main window
+        edit_window.grab_set() # Make it modal
+
+        # Center the dialog
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (edit_window.winfo_width() // 2)
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (edit_window.winfo_height() // 2)
+        edit_window.geometry(f"+{x-100}+{y-50}") # Adjust for initial size
+
+        ttk.Label(edit_window, text=f"Original Name: {original_name}").pack(padx=10, pady=5)
+        ttk.Label(edit_window, text="Enter New Name:").pack(padx=10, pady=5)
+        
+        new_name_var = tk.StringVar(value=current_new_name)
+        name_entry = ttk.Entry(edit_window, textvariable=new_name_var, width=50)
+        name_entry.pack(padx=10, pady=5)
+        name_entry.focus_set()
+
+        def save_new_name():
+            new_name = new_name_var.get().strip()
+            if new_name:
+                item_data['new_name'] = new_name # Update internal data
+                self.preview_tree.set(item_id, "new", new_name) # Update treeview
+                self.status_label.config(text=f"Name for '{original_name}' updated to '{new_name}'.")
+                edit_window.destroy()
+            else:
+                messagebox.showwarning("Input Error", "New name cannot be empty.")
+
+        ttk.Button(edit_window, text="Save", command=save_new_name).pack(pady=10)
+        edit_window.bind('<Return>', lambda e: save_new_name()) # Allow Enter to save
+        edit_window.bind('<Escape>', lambda e: edit_window.destroy()) # Allow Escape to close
+
+    def edit_selected_number(self):
+        selected_items = self.preview_tree.selection()
+        if not selected_items:
+            messagebox.showwarning("No Selection", "Please select an item to edit its number.")
+            return
+        if len(selected_items) > 1:
+            messagebox.showwarning("Multiple Selection", "Please select only one item to edit its number.")
+            return
+        if not self.enable_numbering.get():
+            messagebox.showwarning("Numbering Disabled", "Please enable numbering system on the 'Numbering System' tab first.")
+            return
+
+        item_id = selected_items[0]
+        item_data = self.preview_items[item_id]
+        original_name = item_data['name']
+        is_folder = item_data['is_folder']
+
+        # Try to extract current number if it exists
+        current_new_name = self.preview_tree.set(item_id, "new")
+        current_number_match = re.search(r'(\d+)', current_new_name) # Simple regex to find a number
+        initial_number = int(current_number_match.group(1)) if current_number_match else self.start_number.get()
+
+        edit_window = tk.Toplevel(self.root)
+        edit_window.title("Edit Number")
+        edit_window.transient(self.root)
+        edit_window.grab_set()
+
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (edit_window.winfo_width() // 2)
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (edit_window.winfo_height() // 2)
+        edit_window.geometry(f"+{x-100}+{y-50}")
+
+        ttk.Label(edit_window, text=f"Original Name: {original_name}").pack(padx=10, pady=5)
+        ttk.Label(edit_window, text="Enter New Number:").pack(padx=10, pady=5)
+        
+        new_number_var = tk.IntVar(value=initial_number)
+        number_spinbox = ttk.Spinbox(edit_window, from_=0, to=99999, textvariable=new_number_var, width=10)
+        number_spinbox.pack(padx=10, pady=5)
+        number_spinbox.focus_set()
+
+        def save_new_number():
+            try:
+                new_number = new_number_var.get()
+                if new_number < 0:
+                    messagebox.showwarning("Input Error", "Number cannot be negative.")
+                    return
+                
+                # Regenerate the new name based on the new number and current numbering settings
+                new_name = self.generate_numbered_name(original_name, new_number, is_folder=is_folder)
+                
+                item_data['new_name'] = new_name # Update internal data
+                self.preview_tree.set(item_id, "new", new_name) # Update treeview
+                self.status_label.config(text=f"Number for '{original_name}' updated to '{new_number}'.")
+                edit_window.destroy()
+            except ValueError:
+                messagebox.showwarning("Input Error", "Please enter a valid number.")
+
+        ttk.Button(edit_window, text="Save", command=save_new_number).pack(pady=10)
+        edit_window.bind('<Return>', lambda e: save_new_number())
+        edit_window.bind('<Escape>', lambda e: edit_window.destroy())
+
+    # --- NEW: Filter Preview by Type Function ---
+    def filter_preview_by_type(self, filter_type):
+        # Clear any existing filters (by showing all first)
+        for item_id in self.preview_items:
+            self.preview_tree.item(item_id, open=True) # Ensure it's not hidden by parent collapse
+            self.preview_tree.reattach(item_id, '', tk.END) # Re-add to root to make visible
+
+        if filter_type == "all_files":
+            self.status_label.config(text="Showing all files and folders.")
+            return # All are already visible
+
+        items_to_hide = []
+        for item_id, item_data in self.preview_items.items():
+            is_folder = item_data['is_folder']
+            item_type = item_data['type_str'] # e.g., "Folder", ".txt"
+
+            should_hide = False
+            if filter_type == "folders":
+                if not is_folder:
+                    should_hide = True
+            elif filter_type.startswith("."): # Specific extension filter
+                if is_folder or item_type != filter_type:
+                    should_hide = True
+            else: # Should not happen with current buttons, but as a fallback
+                should_hide = True
+            
+            if should_hide:
+                items_to_hide.append(item_id)
+        
+        for item_id in items_to_hide:
+            self.preview_tree.detach(item_id) # Detach to hide
+
+        self.status_label.config(text=f"Filtered by: {filter_type}. Showing {len(self.preview_items) - len(items_to_hide)} items.")
+
+
+    # --- Context Menu Methods ---
+    def install_context_menu(self):
+        try:
+            command = f'"{sys.executable}" "{self.script_path}" "%V"'
+            bg_key = winreg.CreateKey(winreg.HKEY_CLASSES_ROOT, r"Directory\Background\shell\AdvancedRandomizeFiles")
+            winreg.SetValue(bg_key, "", winreg.REG_SZ, "Advanced File & Folder Randomizer")
+            winreg.SetValueEx(bg_key, "Icon", 0, winreg.REG_SZ, f'"{self.script_path}",0')
+            winreg.SetValue(winreg.CreateKey(bg_key, "command"), "", winreg.REG_SZ, command)
+
+            command = f'"{sys.executable}" "{self.script_path}" "%1"'
+            folder_key = winreg.CreateKey(winreg.HKEY_CLASSES_ROOT, r"Directory\shell\AdvancedRandomizeFiles")
+            winreg.SetValue(folder_key, "", winreg.REG_SZ, "Advanced File & Folder Randomizer")
+            winreg.SetValueEx(folder_key, "Icon", 0, winreg.REG_SZ, f'"{self.script_path}",0')
+            winreg.SetValue(winreg.CreateKey(folder_key, "command"), "", winreg.REG_SZ, command)
+            
+            messagebox.showinfo("Success", "Context menu installed successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to install context menu (run as admin?): {e}")
+
+    def uninstall_context_menu(self):
+        try:
+            for path in [r"Directory\Background\shell\AdvancedRandomizeFiles", r"Directory\shell\AdvancedRandomizeFiles"]:
+                try: winreg.DeleteKey(winreg.HKEY_CLASSES_ROOT, path + r"\command")
+                except FileNotFoundError: pass
+                try: winreg.DeleteKey(winreg.HKEY_CLASSES_ROOT, path)
+                except FileNotFoundError: pass
+            messagebox.showinfo("Success", "Context menu uninstalled successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to uninstall context menu (run as admin?): {e}")
+
+    def check_context_menu_status(self):
+        try:
+            winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r"Directory\shell\AdvancedRandomizeFiles")
+            messagebox.showinfo("Status", "Context menu appears to be installed.")
+        except FileNotFoundError:
+            messagebox.showinfo("Status", "Context menu is not installed.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to check status: {e}")
+    
+    def run(self):
+        if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
+            self.folder_path.set(sys.argv[1])
+            self.load_items_to_preview()
+        self.root.mainloop()
+
+if __name__ == "__main__":
+    app = AdvancedFileRandomizer()
+    app.run()
+--------------------------------------------------------------------------------
+--- END: file_randomizer_advancedv2.py ---
+
+
+--- START: fixed_exiftool_gui.py ---
+--------------------------------------------------------------------------------
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+import subprocess
+import os
+import sys
+import winreg
+import ctypes
+import traceback
+from pathlib import Path
+import threading
+from PIL import Image, ImageTk
+import datetime
+
+try:
+    import piexif
+    from PIL import Image
+    HAS_PIEXIF = True
+except ImportError:
+    HAS_PIEXIF = False
+    print("Warning: piexif and/or PIL not installed. Using exiftool only.")
+
+class AdvancedExifToolGUI(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Advanced Universal Comment Editor")
+        self.geometry("1200x800")
+        self.minsize(800, 600)
+
+        # --- Point directly to C:\Windows\exiftool.exe ---
+        self.exiftool_path = r"C:\Windows\exiftool.exe"
+        if not os.path.exists(self.exiftool_path):
+            messagebox.showerror("Error", f"exiftool.exe not found at:\n{self.exiftool_path}")
+            self.destroy()
+            return
+
+        # Supported image/video extensions
+        self.supported_extensions = {
+            '.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.gif', '.webp',
+            '.cr2', '.nef', '.arw', '.dng', '.raw', '.orf', '.rw2', '.pef',
+            '.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.m4v', '.3gp'
+        }
+
+        # Variables
+        self.current_folder = tk.StringVar()
+        self.current_file = tk.StringVar()
+        self.file_list = []
+        self.selected_file_index = None
+        self.thumbnails = {}
+        self.modified_comments = {}
+        
+        self.configure_layout()
+        self.create_menu()
+        self.create_widgets()
+        
+        # Load folder if passed as an argument
+        if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
+            if os.path.isfile(sys.argv[1]):
+                folder = os.path.dirname(sys.argv[1])
+                self.after(500, lambda: self.load_folder(folder, select_file=sys.argv[1]))
+            else:
+                self.after(500, lambda: self.load_folder(sys.argv[1]))
+
+    def configure_layout(self):
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+    def create_menu(self):
+        menu_bar = tk.Menu(self)
+        self.config(menu=menu_bar)
+        
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Open Folder...", command=self.browse_folder, accelerator="Ctrl+O")
+        file_menu.add_command(label="Refresh Folder", command=self.refresh_folder, accelerator="F5")
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.quit, accelerator="Ctrl+Q")
+        
+        edit_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="Edit", menu=edit_menu)
+        # --- NEW: Undo/Redo Menu Items ---
+        edit_menu.add_command(label="Undo", command=self.undo_comment, accelerator="Ctrl+Z")
+        edit_menu.add_command(label="Redo", command=self.redo_comment, accelerator="Ctrl+Y")
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Save Comment", command=self.save_metadata, accelerator="Ctrl+S")
+        edit_menu.add_command(label="Save All Comments", command=self.save_all_comments, accelerator="Ctrl+Shift+S")
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Copy Comment", command=self.copy_comment, accelerator="Ctrl+C")
+        edit_menu.add_command(label="Paste Comment", command=self.paste_comment, accelerator="Ctrl+V")
+        edit_menu.add_command(label="Clear Comment", command=self.clear_comment, accelerator="Delete")
+        
+        view_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="View", menu=view_menu)
+        view_menu.add_command(label="Show Thumbnails", command=self.toggle_thumbnails)
+        view_menu.add_command(label="Zoom In Preview", command=self.zoom_in_preview, accelerator="Ctrl++")
+        view_menu.add_command(label="Zoom Out Preview", command=self.zoom_out_preview, accelerator="Ctrl+-")
+        
+        tools_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="Batch Apply Comment", command=self.batch_apply_comment)
+        tools_menu.add_command(label="Export Comments to Text", command=self.export_comments)
+        tools_menu.add_command(label="Import Comments from Text", command=self.import_comments)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Add to Right-Click Menu", command=self.install_context_menu)
+        tools_menu.add_command(label="Remove from Right-Click Menu", command=self.uninstall_context_menu)
+        
+        self.bind('<Control-o>', lambda e: self.browse_folder())
+        self.bind('<F5>', lambda e: self.refresh_folder())
+        self.bind('<Control-q>', lambda e: self.quit())
+        self.bind('<Control-s>', lambda e: self.save_metadata())
+        self.bind('<Control-Shift-S>', lambda e: self.save_all_comments())
+        self.bind('<Control-c>', lambda e: self.copy_comment())
+        self.bind('<Control-v>', lambda e: self.paste_comment())
+        # Note: Ctrl+Z and Ctrl+Y are handled by the text widget itself due to `undo=True`
+
+    def create_widgets(self):
+        toolbar = tk.Frame(self, relief=tk.RAISED, bd=1)
+        toolbar.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
+        
+        tk.Label(toolbar, text="Folder:").pack(side=tk.LEFT, padx=(5, 2))
+        folder_entry = tk.Entry(toolbar, textvariable=self.current_folder, state="readonly", width=50)
+        folder_entry.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        tk.Button(toolbar, text="Browse...", command=self.browse_folder).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="Refresh", command=self.refresh_folder).pack(side=tk.LEFT, padx=2)
+        
+        main_container = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
+        main_container.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        
+        left_frame = tk.Frame(main_container)
+        main_container.add(left_frame, minsize=300)
+        
+        tk.Label(left_frame, text="Files:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        list_frame = tk.Frame(left_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        list_scroll_frame = tk.Frame(list_frame)
+        list_scroll_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.file_listbox = tk.Listbox(list_scroll_frame, selectmode=tk.SINGLE)
+        list_scrollbar = tk.Scrollbar(list_scroll_frame, orient=tk.VERTICAL, command=self.file_listbox.yview)
+        self.file_listbox.config(yscrollcommand=list_scrollbar.set)
+        self.file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.file_listbox.bind('<<ListboxSelect>>', self.on_file_select)
+        self.file_listbox.bind('<Double-Button-1>', self.on_file_double_click)
+        self.file_listbox.bind('<Up>', lambda e: self.on_key_press(-1))
+        self.file_listbox.bind('<Down>', lambda e: self.on_key_press(1))
+        
+        info_frame = tk.Frame(left_frame)
+        info_frame.pack(fill=tk.X, pady=(10, 0))
+        self.file_info_text = tk.Text(info_frame, height=4, state=tk.DISABLED, wrap=tk.WORD)
+        info_scroll = tk.Scrollbar(info_frame, orient=tk.VERTICAL, command=self.file_info_text.yview)
+        self.file_info_text.config(yscrollcommand=info_scroll.set)
+        self.file_info_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        info_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        right_container = tk.PanedWindow(main_container, orient=tk.VERTICAL, sashrelief=tk.RAISED)
+        main_container.add(right_container, minsize=400)
+        
+        preview_frame = tk.Frame(right_container)
+        right_container.add(preview_frame, minsize=200)
+        tk.Label(preview_frame, text="Preview:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        preview_container = tk.Frame(preview_frame)
+        preview_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.preview_canvas = tk.Canvas(preview_container, bg="white", width=300, height=200)
+        preview_h_scroll = tk.Scrollbar(preview_container, orient=tk.HORIZONTAL, command=self.preview_canvas.xview)
+        preview_v_scroll = tk.Scrollbar(preview_container, orient=tk.VERTICAL, command=self.preview_canvas.yview)
+        self.preview_canvas.config(xscrollcommand=preview_h_scroll.set, yscrollcommand=preview_v_scroll.set)
+        self.preview_canvas.grid(row=0, column=0, sticky="nsew")
+        preview_h_scroll.grid(row=1, column=0, sticky="ew")
+        preview_v_scroll.grid(row=0, column=1, sticky="ns")
+        preview_container.grid_rowconfigure(0, weight=1)
+        preview_container.grid_columnconfigure(0, weight=1)
+        
+        comment_frame = tk.Frame(right_container)
+        right_container.add(comment_frame, minsize=200)
+        file_display_frame = tk.Frame(comment_frame)
+        file_display_frame.pack(fill=tk.X, pady=(0, 5))
+        tk.Label(file_display_frame, text="Current File:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        self.current_file_label = tk.Label(file_display_frame, text="No file selected", fg="blue", cursor="hand2")
+        self.current_file_label.pack(side=tk.LEFT, padx=(10, 0))
+        self.current_file_label.bind("<Button-1>", self.open_file_location)
+        
+        tk.Label(comment_frame, text="Comment:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 2))
+        
+        # --- MODIFIED: Enabled undo feature on the text widget ---
+        self.txt_comment = scrolledtext.ScrolledText(comment_frame, wrap=tk.WORD, height=8, undo=True)
+        self.txt_comment.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.txt_comment.bind("<KeyRelease>", self.on_comment_modified)
+
+        button_frame = tk.Frame(comment_frame)
+        button_frame.pack(fill=tk.X)
+        
+        tk.Button(button_frame, text="Save Comment", command=self.save_metadata, bg="#4CAF50", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Button(button_frame, text="Clear", command=self.clear_comment).pack(side=tk.LEFT, padx=2)
+        tk.Button(button_frame, text="Copy", command=self.copy_comment).pack(side=tk.LEFT, padx=2)
+        tk.Button(button_frame, text="Paste", command=self.paste_comment).pack(side=tk.LEFT, padx=2)
+        # --- NEW: Undo/Redo Buttons ---
+        tk.Button(button_frame, text="Undo", command=self.undo_comment).pack(side=tk.LEFT, padx=2)
+        tk.Button(button_frame, text="Redo", command=self.redo_comment).pack(side=tk.LEFT, padx=2)
+
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(comment_frame, variable=self.progress_var, maximum=100, length=300)
+        self.progress_label = tk.Label(comment_frame, text="")
+        
+        status_frame = tk.Frame(self, relief=tk.SUNKEN, bd=1)
+        status_frame.grid(row=2, column=0, sticky="ew")
+        self.status_label = tk.Label(status_frame, text="Ready", anchor="w")
+        self.status_label.pack(side=tk.LEFT, padx=5)
+        self.file_count_label = tk.Label(status_frame, text="No files loaded", anchor="e")
+        self.file_count_label.pack(side=tk.RIGHT, padx=5)
+
+    # --- NEW: Helper function to set text and reset undo history ---
+    def _set_comment_text(self, text):
+        """Sets text in the comment box and resets the undo/redo stack."""
+        self.txt_comment.delete(1.0, tk.END)
+        self.txt_comment.insert(1.0, text)
+        self.txt_comment.edit_reset()
+
+    def update_status(self, message):
+        self.status_label.config(text=message)
+        self.update_idletasks()
+
+    def show_progress(self, show=True):
+        if show:
+            self.progress_bar.pack(fill=tk.X, pady=(10, 5))
+            self.progress_label.pack()
+        else:
+            self.progress_bar.pack_forget()
+            self.progress_label.pack_forget()
+
+    def update_progress(self, value, text=""):
+        self.progress_var.set(value)
+        self.progress_label.config(text=text)
+        self.update_idletasks()
+
+    def browse_folder(self):
+        folder_path = filedialog.askdirectory()
+        if folder_path: self.load_folder(folder_path)
+
+    def load_folder(self, folder_path, select_file=None):
+        """Load all supported files from the folder with a numbered list."""
+        try:
+            self.update_status("Loading folder...")
+            self.current_folder.set(folder_path)
+            
+            # Clear current data
+            self.file_listbox.delete(0, tk.END)
+            self.file_list.clear()
+            self.thumbnails.clear()
+            self.modified_comments.clear()
+            
+            # Get all supported files
+            folder = Path(folder_path)
+            all_files = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in self.supported_extensions]
+            
+            # Sort files naturally
+            all_files.sort(key=lambda x: x.name.lower())
+            
+            # Add to list with numbers
+            for i, file_path in enumerate(all_files):
+                self.file_list.append(str(file_path))
+                # --- MODIFIED: Prepend number to the listbox entry ---
+                self.file_listbox.insert(tk.END, f"{i + 1}. {file_path.name}")
+            
+            # Update file count
+            self.file_count_label.config(text=f"{len(self.file_list)} files loaded")
+            
+            # Select specific file if requested
+            if select_file and select_file in self.file_list:
+                index = self.file_list.index(select_file)
+                self.file_listbox.selection_set(index)
+                self.file_listbox.see(index)
+                self.on_file_select(None)
+            elif self.file_list:
+                # Select first file by default
+                self.file_listbox.selection_set(0)
+                self.on_file_select(None)
+            
+            self.update_status("Folder loaded successfully")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load folder: {str(e)}")
+            self.update_status("Error loading folder")
+
+    def refresh_folder(self):
+        folder_path = self.current_folder.get()
+        if folder_path and os.path.exists(folder_path):
+            self.load_folder(folder_path, select_file=self.get_selected_file())
+
+    def on_file_select(self, event):
+        selection = self.file_listbox.curselection()
+        if selection:
+            index = selection[0]
+            if index == self.selected_file_index: return
+
+            self.selected_file_index = index
+            file_path = self.file_list[index]
+            self.current_file.set(file_path)
+            self.current_file_label.config(text=os.path.basename(file_path))
+            
+            threading.Thread(target=self.load_file_data, args=(file_path,), daemon=True).start()
+
+    def on_file_double_click(self, event):
+        file_path = self.get_selected_file()
+        if file_path:
+            try: os.startfile(file_path)
+            except Exception as e: messagebox.showerror("Error", f"Failed to open file: {str(e)}")
+                
+    def on_key_press(self, direction):
+        selection = self.file_listbox.curselection()
+        if not selection: return
+        current_index = selection[0]
+        new_index = current_index + direction
+        if 0 <= new_index < self.file_listbox.size():
+            self.file_listbox.selection_clear(current_index)
+            self.file_listbox.selection_set(new_index)
+            self.file_listbox.see(new_index)
+            self.on_file_select(None)
+
+    def get_selected_file(self):
+        return self.current_file.get() or None
+
+    def load_file_data(self, file_path):
+        try:
+            self.after(0, lambda: self.update_file_info(file_path))
+            self.after(0, lambda: self.load_preview(file_path))
+            
+            # Use the new helper to load text and reset undo history
+            if file_path in self.modified_comments:
+                comment_to_load = self.modified_comments[file_path]
+                self.after(0, self._set_comment_text, comment_to_load)
+            else:
+                self.after(0, lambda: self.read_metadata(file_path))
+        except Exception as e:
+            self.after(0, lambda: self.update_status(f"Error loading file data: {str(e)}"))
+
+    def update_file_info(self, file_path):
+        try:
+            stat = os.stat(file_path)
+            size = stat.st_size
+            if size < 1024: size_str = f"{size} B"
+            elif size < 1024**2: size_str = f"{size/1024:.1f} KB"
+            else: size_str = f"{size/1024**2:.1f} MB"
+            
+            dimensions = ""
+            try:
+                with Image.open(file_path) as img:
+                    dimensions = f"\nDimensions: {img.width} x {img.height}"
+            except: pass
+            
+            info_text = f"Size: {size_str}{dimensions}\nPath: {file_path}"
+            
+            self.file_info_text.config(state=tk.NORMAL)
+            self.file_info_text.delete(1.0, tk.END)
+            self.file_info_text.insert(1.0, info_text)
+            self.file_info_text.config(state=tk.DISABLED)
+        except Exception as e:
+            # Handle error
+            pass
+
+    def load_preview(self, file_path):
+        try:
+            self.preview_canvas.delete("all")
+            if not any(file_path.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']):
+                self.preview_canvas.create_text(150, 100, text="Preview not available", fill="gray", font=("Arial", 12))
+                return
+            
+            with Image.open(file_path) as img:
+                canvas_width = self.preview_canvas.winfo_width() or 300
+                canvas_height = self.preview_canvas.winfo_height() or 200
+                
+                img_ratio = img.width / img.height
+                canvas_ratio = canvas_width / canvas_height
+                
+                if img_ratio > canvas_ratio:
+                    new_width = min(canvas_width - 20, img.width)
+                    new_height = int(new_width / img_ratio)
+                else:
+                    new_height = min(canvas_height - 20, img.height)
+                    new_width = int(new_height * img_ratio)
+                
+                img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img_resized)
+                
+                self.preview_canvas.config(scrollregion=(0, 0, new_width, new_height))
+                self.preview_canvas.create_image(new_width//2, new_height//2, image=photo, anchor="center")
+                self.preview_canvas.image = photo
+        except Exception as e:
+            self.preview_canvas.create_text(150, 100, text=f"Preview error:\n{e}", fill="red")
+
+    def read_metadata(self, file_path=None):
+        if not file_path: file_path = self.get_selected_file()
+        if not file_path or not os.path.exists(file_path): return
+        
+        comment, source = self._read_comment_data(file_path)
+        display_text = f"[Found in: {source}]\n\n{comment}" if comment else "No comment found."
+        self._set_comment_text(display_text) # Use helper to load text
+
+    def _read_comment_data(self, file_path):
+        found_comment, source_tag = "", ""
+        if HAS_PIEXIF:
+            try:
+                exif_dict = piexif.load(file_path)
+                comment_bytes = exif_dict["0th"].get(piexif.ImageIFD.ImageDescription, b'')
+                if comment_bytes:
+                    found_comment = comment_bytes.decode('utf-8', errors='ignore')
+                    source_tag = "EXIF ImageDescription"
+            except: pass
+        
+        if not found_comment:
+            try:
+                result = self.run_exiftool(["-Comment", "-s3", file_path])
+                if result.returncode == 0 and result.stdout.strip():
+                    found_comment, source_tag = result.stdout.strip(), "Windows Comment"
+            except: pass
+            
+        if not found_comment:
+            for tag in ['ImageDescription', 'UserComment', 'Description']:
+                try:
+                    result = self.run_exiftool([f"-{tag}", "-s3", file_path])
+                    if result.returncode == 0 and result.stdout.strip():
+                        found_comment, source_tag = result.stdout.strip(), f"{tag} (exiftool)"
+                        break
+                except: continue
+        return found_comment, source_tag
+
+    def _clean_comment_text(self, text):
+        if text.startswith("[Found in:"):
+            lines = text.split('\n', 2)
+            return lines[2] if len(lines) > 2 else ""
+        return text
+
+    def save_metadata(self):
+        file_path = self.get_selected_file()
+        if not file_path:
+            messagebox.showerror("Error", "No file selected.")
+            return
+        
+        new_comment = self._clean_comment_text(self.txt_comment.get("1.0", tk.END).strip())
+        
+        if self.write_comment_to_file(file_path, new_comment):
+            messagebox.showinfo("Success", "Comment saved! ✅")
+            self._mark_file_as_saved(file_path)
+            self.after(100, lambda: self.read_metadata(file_path))
+        else:
+            messagebox.showerror("Error", "Failed to write comment.")
+
+    def write_comment_to_file(self, file_path, comment):
+        success_count = 0
+        if HAS_PIEXIF:
+            try:
+                exif_dict = piexif.load(file_path)
+                exif_dict["0th"][piexif.ImageIFD.ImageDescription] = comment.encode('utf-8')
+                exif_bytes = piexif.dump(exif_dict)
+                image = Image.open(file_path)
+                image.save(file_path, exif=exif_bytes)
+                success_count += 1
+            except Exception as e: print(f"piexif error: {e}")
+        
+        try:
+            result = self.run_exiftool([f"-Comment={comment}", "-overwrite_original", file_path])
+            if result.returncode == 0: success_count += 1
+            else: print(f"exiftool error: {result.stderr}")
+        except Exception as e: print(f"exiftool error: {e}")
+        return success_count > 0
+
+    def save_all_comments(self):
+        modified_files = list(self.modified_comments.keys())
+        if not modified_files:
+            messagebox.showinfo("Info", "No comments have been modified.")
+            return
+
+        msg = f"Save changes to {len(modified_files)} files?"
+        if not messagebox.askyesno("Save All Changes", msg): return
+
+        self.show_progress(True)
+        success_count, total_files = 0, len(modified_files)
+
+        for i, file_path in enumerate(modified_files):
+            comment = self._clean_comment_text(self.modified_comments[file_path])
+            self.update_progress((i / total_files) * 100, f"Saving {os.path.basename(file_path)}...")
+            
+            if self.write_comment_to_file(file_path, comment):
+                success_count += 1
+                self.after(0, self._mark_file_as_saved, file_path)
+        
+        self.show_progress(False)
+        messagebox.showinfo("Batch Save Complete", f"Successfully saved {success_count}/{total_files} files.")
+        self.update_status(f"Saved {success_count} files.")
+
+    def copy_comment(self):
+        try:
+            comment = self._clean_comment_text(self.txt_comment.get("1.0", tk.END).strip())
+            self.clipboard_clear()
+            self.clipboard_append(comment)
+            self.update_status("Comment copied")
+        except: pass
+
+    def paste_comment(self):
+        try:
+            self._set_comment_text(self.clipboard_get())
+            self.on_comment_modified()
+            self.update_status("Comment pasted")
+        except: pass
+
+    def clear_comment(self):
+        self._set_comment_text("")
+        self.on_comment_modified()
+    
+    # --- NEW: Undo/Redo command handlers ---
+    def undo_comment(self, event=None):
+        try:
+            self.txt_comment.edit_undo()
+        except tk.TclError:
+            pass # Stack is empty
+
+    def redo_comment(self, event=None):
+        try:
+            self.txt_comment.edit_redo()
+        except tk.TclError:
+            pass # Stack is empty
+
+    def on_comment_modified(self, event=None):
+        file_path = self.get_selected_file()
+        if not file_path: return
+
+        current_comment = self.txt_comment.get("1.0", tk.END).strip()
+        self.modified_comments[file_path] = current_comment
+        
+        try:
+            index = self.file_list.index(file_path)
+            current_name = self.file_listbox.get(index)
+            if not current_name.endswith(" *"):
+                self.file_listbox.delete(index)
+                self.file_listbox.insert(index, f"{current_name} *")
+                self.file_listbox.selection_set(index)
+            self.update_status(f"Modified {os.path.basename(file_path)}")
+        except (ValueError, tk.TclError): pass
+
+    def _mark_file_as_saved(self, file_path):
+        if file_path in self.modified_comments:
+            del self.modified_comments[file_path]
+        
+        try:
+            index = self.file_list.index(file_path)
+            current_name = self.file_listbox.get(index)
+            if current_name.endswith(" *"):
+                self.file_listbox.delete(index)
+                self.file_listbox.insert(index, current_name[:-2])
+                if self.selected_file_index == index:
+                    self.file_listbox.selection_set(index)
+        except (ValueError, tk.TclError): pass
+            
+        self.update_status(f"Saved {os.path.basename(file_path)}")
+
+    def toggle_thumbnails(self): messagebox.showinfo("Info", "Thumbnail view not yet implemented.")
+    def zoom_in_preview(self): messagebox.showinfo("Info", "Zoom in not yet implemented.")
+    def zoom_out_preview(self): messagebox.showinfo("Info", "Zoom out not yet implemented.")
+    
+    def batch_apply_comment(self):
+        if not self.file_list: return
+        comment = self._clean_comment_text(self.txt_comment.get("1.0", tk.END).strip())
+        if not comment: return
+        
+        if not messagebox.askyesno("Batch Apply", f"Apply to all {len(self.file_list)} files?"): return
+        
+        self.show_progress(True)
+        success_count = 0
+        for i, file_path in enumerate(self.file_list):
+            self.update_progress((i / len(self.file_list)) * 100, f"Processing {os.path.basename(file_path)}...")
+            if self.write_comment_to_file(file_path, comment):
+                success_count += 1
+            self._mark_file_as_saved(file_path)
+        
+        self.show_progress(False)
+        messagebox.showinfo("Batch Complete", f"Applied comment to {success_count}/{len(self.file_list)} files.")
+
+    def export_comments(self):
+        if not self.file_list: return
+        file_path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text", "*.txt")], title="Export Comments")
+        if not file_path: return
+        
+        self.show_progress(True)
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(f"# Exported Comments from {self.current_folder.get()}\n\n")
+                for i, img_path in enumerate(self.file_list):
+                    self.update_progress((i / len(self.file_list)) * 100, f"Reading {os.path.basename(img_path)}...")
+                    comment, _ = self._read_comment_data(img_path)
+                    f.write(f"File: {os.path.basename(img_path)}\nComment: {comment or '(none)'}\n---\n")
+            self.show_progress(False)
+            messagebox.showinfo("Success", "Comments exported.")
+        except Exception as e:
+            self.show_progress(False)
+            messagebox.showerror("Error", f"Failed to export: {e}")
+
+    def import_comments(self): messagebox.showinfo("Info", "Import not yet implemented.")
+
+    def open_file_location(self, event):
+        file_path = self.get_selected_file()
+        if file_path and os.path.exists(file_path):
+            subprocess.run(['explorer', '/select,', file_path])
+
+    def run_exiftool(self, args):
+        command = [self.exiftool_path] + args
+        try:
+            return subprocess.run(
+                command, capture_output=True, text=True, encoding='utf-8', check=False,
+                startupinfo=subprocess.STARTUPINFO(wShowWindow=subprocess.SW_HIDE),
+                creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception as e:
+            class MockResult:
+                returncode, stdout, stderr = 1, "", str(e)
+            return MockResult()
+
+    def install_context_menu(self):
+        if not is_admin():
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{__file__}" --install', None, 1)
+            return
+        try:
+            script_path = os.path.abspath(__file__)
+            python_exe = sys.executable.replace('python.exe', 'pythonw.exe')
+            if not os.path.exists(python_exe): python_exe = sys.executable
+            command = f'"{python_exe}" "{script_path}" "%1"'
+            
+            key_path = r'*\shell\EditExifCommentGUI_Advanced'
+            with winreg.CreateKey(winreg.HKEY_CLASSES_ROOT, key_path) as key:
+                winreg.SetValue(key, '', winreg.REG_SZ, 'Edit Comment (Advanced) 📝')
+            with winreg.CreateKey(winreg.HKEY_CLASSES_ROOT, f'{key_path}\\command') as key:
+                winreg.SetValue(key, '', winreg.REG_SZ, command)
+            
+            folder_key_path = r'Directory\shell\EditExifCommentGUI_Advanced'
+            with winreg.CreateKey(winreg.HKEY_CLASSES_ROOT, folder_key_path) as key:
+                winreg.SetValue(key, '', winreg.REG_SZ, 'Edit Comments (Advanced) 📁')
+            with winreg.CreateKey(winreg.HKEY_CLASSES_ROOT, f'{folder_key_path}\\command') as key:
+                winreg.SetValue(key, '', winreg.REG_SZ, command)
+            messagebox.showinfo("Success", "Context menu added!")
+        except Exception as e: messagebox.showerror("Error", f"Failed to add context menu:\n{e}")
+
+    def uninstall_context_menu(self):
+        if not is_admin():
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{__file__}" --uninstall', None, 1)
+            return
+        try:
+            for key_path in [r'*\shell\EditExifCommentGUI_Advanced', r'Directory\shell\EditExifCommentGUI_Advanced']:
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CLASSES_ROOT, f'{key_path}\\command')
+                    winreg.DeleteKey(winreg.HKEY_CLASSES_ROOT, key_path)
+                except FileNotFoundError: pass
+            messagebox.showinfo("Success", "Context menu removed!")
+        except Exception as e: messagebox.showerror("Error", f"Failed to remove context menu:\n{e}")
+
+def is_admin():
+    try: return ctypes.windll.shell32.IsUserAnAdmin()
+    except: return False
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) > 1:
+            if sys.argv[1] == '--install' and is_admin():
+                AdvancedExifToolGUI().install_context_menu()
+                sys.exit(0)
+            elif sys.argv[1] == '--uninstall' and is_admin():
+                AdvancedExifToolGUI().uninstall_context_menu()
+                sys.exit(0)
+        
+        app = AdvancedExifToolGUI()
+        if app.winfo_exists(): app.mainloop()
+    except Exception as e:
+        # Fallback error message box
+        error_log_path = os.path.join(os.path.expanduser("~"), "exif_gui_error.log")
+        with open(error_log_path, "w") as f:
+            f.write(f"Error: {e}\nTraceback: {traceback.format_exc()}\n")
+        messagebox.showerror("Fatal Error", f"A critical error occurred. See log for details:\n{error_log_path}")
+--------------------------------------------------------------------------------
+--- END: fixed_exiftool_gui.py ---
+
+
+--- START: merged_output.txt ---
+--------------------------------------------------------------------------------
+--- Merged Files Compilation ---
+Source Directory: C:\Scripts\Random_Scripts\New folder
+Generated on: 2025-08-24 10:29:47
+================================================================================
+
+
+--------------------------------------------------------------------------------
+--- END: merged_output.txt ---
+
+
